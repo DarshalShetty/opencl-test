@@ -17,7 +17,7 @@
 
 (define event #f)
 (define iNumElements 1277944)    ;Length of float arrays to process (odd # for illustration)
-(define-runtime-path cSourceFile "DotProduct.cl")
+(define-runtime-path cSourceFile "dot-product.cl")
 
 (display "Starting...\n\n")
 (printf "# of float elements per Array \t= ~a~n" iNumElements)

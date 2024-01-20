@@ -2,7 +2,10 @@
 (require opencl/c
          ffi/cvector
          ffi/unsafe/cvector
-         ffi/unsafe)
+         ffi/unsafe
+         malt/flat-tensors/no-overrides
+         (relative-in "../malt/flat-tensors/tensors/."
+                      "1-flats.rkt"))
 
 (provide printDeviceInfo)
 (provide deltaT)
@@ -11,6 +14,18 @@
 (provide fillArray)
 (provide compareArrays)
 (provide compareArraysL2)
+(provide random-tensor)
+(provide fill-with-tensor)
+
+(define (random-tensor min max s)
+  (build-tensor s (λ (i) (random min max))))
+
+(define (fill-with-tensor mem t)
+  (define size (size-of (shape t)))
+  (define flat-t (reshape (list size) t))
+  ;; Assuming mem has allocated space >= size of t
+  (for ([i (in-range size)])
+    (ptr-set! mem _cl_float i (exact->inexact (tref flat-t i)))))
 
 (define (compareArraysL2 reference data len [epsilon 1e-6])
   (define error 0)

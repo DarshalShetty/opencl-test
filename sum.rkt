@@ -97,9 +97,13 @@
       (dynamic-wind
         (λ () (initialize devices device))
         (λ ()
-          (define t (random-tensor 0 100 '(100 100 500)))
-          (define golden (sum-ρ t))
-          (define result (sum/opencl t))
+          (define t-shape '(1000 1000 500))
+          (printf "Shape of tensor to be summed: ~a~n" t-shape)
+          (define t (random-tensor 0 100 t-shape))
+          (printf "Timing for CPU computation (in ms):~n")
+          (define golden (time (sum-ρ t)))
+          (printf "Timing for GPU computation (in ms):~n")
+          (define result (time (sum/opencl t)))
           (check-tensor-equal? result golden))
         cleanup))))
 

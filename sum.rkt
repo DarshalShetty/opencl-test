@@ -64,14 +64,17 @@
                                            (* (ctype-sizeof _cl_float)
                                               src-size)
                                            src-mem (make-vector 0)))
-         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
-                                             (make-vector 1 dst-size)
-                                             (make-vector 1 1)
-                                             (make-vector 0)))
-         (set! event (clEnqueueReadBuffer (command-queue) dst-buf 'CL_TRUE 0
-                                          (* (ctype-sizeof _cl_float)
-                                             dst-size)
-                                          dst-mem (vector event)))
+         (printf "Timing for GPU computation (in ms):~n")
+         (time
+          (begin
+            (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                                (make-vector 1 dst-size)
+                                                (make-vector 1 1)
+                                                (make-vector 0)))
+            (set! event (clEnqueueReadBuffer (command-queue) dst-buf 'CL_TRUE 0
+                                             (* (ctype-sizeof _cl_float)
+                                                dst-size)
+                                             dst-mem (vector event)))))
          (reshape dst-shape
                   (build-tensor (list dst-size)
                                 (λ (i)
@@ -97,13 +100,12 @@
       (dynamic-wind
         (λ () (initialize devices device))
         (λ ()
-          (define t-shape '(1000 1000 500))
+          (define t-shape '(10 10 500))
           (printf "Shape of tensor to be summed: ~a~n" t-shape)
           (define t (random-tensor 0 100 t-shape))
           (printf "Timing for CPU computation (in ms):~n")
           (define golden (time (sum-ρ t)))
-          (printf "Timing for GPU computation (in ms):~n")
-          (define result (time (sum/opencl t)))
+          (define result (sum/opencl t))
           (check-tensor-equal? result golden))
         cleanup))))
 

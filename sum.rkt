@@ -60,18 +60,16 @@
          (set! event (clEnqueueWriteBuffer (command-queue) src-buf 'CL_FALSE 0
                                            (* (ctype-sizeof _cl_float)
                                               src-size)
-                                           (vec->cpointer (flat-store t)) (make-vector 0)))
-         (printf "Timing for GPU computation (in ms):~n")
-         (time
-          (begin
-            (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                           (vec->cpointer (flat-store t))
+                                           (make-vector 0)))
+         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
                                                 (make-vector 1 dst-size)
                                                 (make-vector 1 1)
                                                 (make-vector 0)))
-            (set! event (clEnqueueReadBuffer (command-queue) dst-buf 'CL_TRUE 0
-                                             (* (ctype-sizeof _cl_float)
-                                                dst-size)
-                                             (vec->cpointer dst-store) (vector event)))))
+         (set! event (clEnqueueReadBuffer (command-queue) dst-buf 'CL_TRUE 0
+                                          (* (ctype-sizeof _cl_float)
+                                             dst-size)
+                                          (vec->cpointer dst-store) (vector event)))
          (flat dst-shape dst-store 0))
        (λ ()
          (when kernel
@@ -97,7 +95,8 @@
           (define t (random-tensor 0 100 t-shape))
           (printf "Timing for CPU computation (in ms):~n")
           (define golden (time (sum-ρ t)))
-          (define result (sum/opencl t))
+          (printf "Timing for GPU computation (in ms):~n")
+          (define result (time (sum/opencl t)))
           (check-tensor-equal? result golden))
         cleanup))))
 

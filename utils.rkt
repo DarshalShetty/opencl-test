@@ -1,10 +1,9 @@
 #lang racket
 (require opencl/c
-         ffi/cvector
          ffi/unsafe/cvector
          ffi/unsafe
-         malt/flat-tensors/no-overrides
-         (relative-in "../malt/flat-tensors/tensors/."
+         malt/uniform-tensors/no-overrides
+         (relative-in "../malt/uniform-tensors/tensors/."
                       "1-flats.rkt"))
 
 (provide printDeviceInfo)

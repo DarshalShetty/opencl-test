@@ -7,43 +7,14 @@
                       "1-flats.rkt"))
 
 (provide printDeviceInfo)
-(provide deltaT)
 (provide cvector->vector)
 (provide roundUp)
 (provide fillArray)
 (provide compareArrays)
-(provide compareArraysL2)
 (provide random-tensor)
-(provide fill-with-tensor)
 
 (define (random-tensor min max s)
   (build-tensor s (λ (i) (random min max))))
-
-(define (fill-with-tensor mem t)
-  (define size (size-of (shape t)))
-  (define flat-t (reshape (list size) t))
-  ;; Assuming mem has allocated space >= size of t
-  (for ([i (in-range size)])
-    (ptr-set! mem _cl_float i (exact->inexact (tref flat-t i)))))
-
-(define (compareArraysL2 reference data len [epsilon 1e-6])
-  (define error 0)
-  (define ref 0)
-  (define result #t)
-  (for ([i (in-range len)])
-    (define refVal (ptr-ref reference _cl_float i))
-    (define diff (- refVal (ptr-ref data _cl_float i)))
-    (set! error (+ error (* diff diff)))
-    (set! ref (+ ref (* refVal refVal))))
-  (define normRef (sqrt ref))
-  (when (< (abs ref) 1e-7)
-    (display "ERROR, reference l2-norm is 0\n")
-    (set! result #f))
-  (define normError (sqrt error))
-  (set! error (/ normError normRef))
-  (set! result (< error epsilon))
-  (unless result (printf "ERROR, l2-norm error ~a is greater than epsilon ~a~n" (real->decimal-string error 2) epsilon))
-  result)
 
 (define (compareArrays data ref numElements [epsilon 0.001])
   (define errorCount 0)
@@ -66,21 +37,6 @@
 (define (cvector->vector cv)
   (build-vector (cvector-length cv)
                 (curry cvector-ref cv)))
-
-(define timer0 0)
-(define timer1 0)
-(define timer2 0)
-(define (deltaT which)
-  (define newTime (current-inexact-milliseconds))
-  (define delta 0)
-  (match which
-    [0 (set! delta (- newTime timer0))
-       (set! timer0 newTime)]
-    [1 (set! delta (- newTime timer1))
-       (set! timer1 newTime)]
-    [2 (set! delta (- newTime timer2))
-       (set! timer2 newTime)])
-  (/ delta 1000))
 
 (define (printDeviceInfo device)
   (printf "  CL_DEVICE_NAME: \t\t\t~a~n"

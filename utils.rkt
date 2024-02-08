@@ -74,6 +74,8 @@
           (/ (clGetDeviceInfo:generic device 'CL_DEVICE_LOCAL_MEM_SIZE) 1024))
   (printf "  CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE: \t~a KByte~n"
           (/ (clGetDeviceInfo:generic device 'CL_DEVICE_MAX_CONSTANT_BUFFER_SIZE) 1024))
+  (printf "  CL_DEVICE_MAX_CONSTANT_ARGS: \t~a~n"
+          (clGetDeviceInfo:generic device 'CL_DEVICE_MAX_CONSTANT_ARGS))
   (printf "  CL_DEVICE_QUEUE_PROPERTIES: \t\t~a~n"
           (clGetDeviceInfo:generic device 'CL_DEVICE_QUEUE_PROPERTIES))
   (printf "  CL_DEVICE_IMAGE_SUPPORT: \t\t~a~n"

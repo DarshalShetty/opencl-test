@@ -17,10 +17,12 @@
 (define command-queue (make-parameter #f))
 
 (define (initialize devices device-idx)
+  (define device (cvector-ref devices device-idx))
+  (displayln "#### Device Info ####")
+  (printDeviceInfo device)
+  (displayln "#####################\n")
   (context (clCreateContext #f (cvector->vector devices)))
-  (command-queue (clCreateCommandQueue (context)
-                                       (cvector-ref devices device-idx)
-                                       '())))
+  (command-queue (clCreateCommandQueue (context) device '())))
 
 (define (cleanup)
   (when (command-queue)

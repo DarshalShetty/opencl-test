@@ -12,6 +12,10 @@
 (provide fillArray)
 (provide compareArrays)
 (provide random-tensor)
+(provide zeroes)
+
+(define (zeroes t)
+  (build-tensor (shape t) (λ (_) 0.0)))
 
 (define (random-tensor min max s)
   (build-tensor s (λ (i) (random min max))))

@@ -114,21 +114,27 @@
               (file->bytes mult-kernel-file)
               #"Mult"))
 
-(define idxs^
-  (λ (strides out-i i0 i1)
-    ;; TODO: Generate OpenCL C code which computes final i0 and i1. Since
-    ;; strides is known at compile time, we can unfold an expression for each
-    ;; element in strides. The only variable which the generated code will
-    ;; depend on will be out-i i.e. the global index.
-    (for/fold ([i0 i0]
-               [i1 i1]
-               [x out-i] #:result (values i0 i1))
-              ([stride strides])
-      (let ((idx (quotient x (vector-ref stride 0)))
-            (next-x (remainder x (vector-ref stride 0))))
-        (values (+ i0 (* idx (vector-ref stride 1)))
-                (+ i1 (* idx (vector-ref stride 2)))
-                next-x)))))
+(define (number->bytes n)
+  (string->bytes/utf-8 (number->string n)))
+
+(define (binary-expr rator rand1 rand2)
+  (bytes-append #"(" rand1 #" " rator #" " rand2 #")"))
+
+(define idx-exprs-gen
+  (λ (strides i0 i1)
+    (λ (out-i)
+      (for/fold ([i0 (number->bytes i0)]
+                 [i1 (number->bytes i1)]
+                 [x out-i] #:result (values i0 i1))
+                ([stride strides])
+        (let ((stride-out (number->bytes (vector-ref stride 0)))
+              (stride0 (number->bytes (vector-ref stride 1)))
+              (stride1 (number->bytes (vector-ref stride 2))))
+          (let ((idx (binary-expr #"/" x stride-out))
+                (next-x (binary-expr #"%" x stride-out)))
+            (values (binary-expr #"+" i0 (binary-expr #"*" idx stride0))
+                    (binary-expr #"+" i1 (binary-expr #"*" idx stride1))
+                    next-x)))))))
 
 (define flat-ext2-ρ
   (λ (f r0 r1 shape-fn t0 t1)
@@ -146,22 +152,26 @@
            (stride0 (size-of sf0))
            (stride1 (size-of sf1))
            (stride-out (size-of sf-out)))
-      (ext2-shapes s0 s1 r0 r1 sf-out
-        (λ (s-out size-out q0 q1 strides)
-          #;
-          (printf "s0=~a~ns1=~a~nr0=~a~nr1=~a~nsf-out=~a~ns-out=~a~nsize-out=~a~nq0=~a~nq1=~a~nstrides=~a~n"
-             s0 s1 r0 r1 sf-out s-out size-out q0 q1 strides)
-         (let ((out-v (make-vector size-out 0.0)))
-            (for ([out-i (in-range 0 size-out stride-out)])
-              (let-values (((i0 i1)
-                            (idxs strides out-i off0 off1))
-                           ((i0^ i1^)
-                            (idxs^ strides out-i off0 off1)))
-                (printf "~a~n" i0 i1)
-                (printf "~a~n" i0^ i1^)
-                #;
-                (f v0 i0 stride0 v1 i1 stride1 out-v (+ 0 out-i) stride-out)))
-            (flat s-out out-v 0)))))))
+      (ext2-shapes
+       s0 s1 r0 r1 sf-out
+       (λ (s-out size-out q0 q1 strides)
+         (let ((out-v (make-vector size-out 0.0))
+               (gen-exprs (idx-exprs-gen strides off0 off1)))
+           (printf "General Expressions:~n")
+           (define-values (i0-expr i1-expr) (gen-exprs #"i-out"))
+           (printf "i0 = ~a~n" i0-expr)
+           (printf "i1 = ~a~n~n" i1-expr)
+           (for ([out-i (in-range 0 size-out stride-out)])
+             (let-values (((i0 i1)
+                           (idxs strides out-i off0 off1))
+                          ((i0-expr i1-expr)
+                           (gen-exprs (number->bytes out-i))))
+               (printf "~a = ~a ~n" i0 i0-expr)
+               (printf "~a = ~a ~n" i1 i1-expr)
+               #;
+               (f v0 i0 stride0 v1 i1 stride1 out-v (+ 0 out-i) stride-out)))
+           ;; TODO: Figure out a way to compose the kernel source code using idx-exprs-gen, and then run it.
+           (flat s-out out-v 0)))))))
 
 ;; TODO: For any tensor t0, a shape function shape-fn, minimum rank
 ;; min-rank and associated values derived from them, show that:

@@ -116,6 +116,10 @@
 
 (define idxs^
   (λ (strides out-i i0 i1)
+    ;; TODO: Generate OpenCL C code which computes final i0 and i1. Since
+    ;; strides is known at compile time, we can unfold an expression for each
+    ;; element in strides. The only variable which the generated code will
+    ;; depend on will be out-i i.e. the global index.
     (for/fold ([i0 i0]
                [i1 i1]
                [x out-i] #:result (values i0 i1))
@@ -268,11 +272,12 @@
          [event #f])
      (dynamic-wind
        (λ ()
+         ;; Exclude memory consumed by elements before offset of input vector v0
          (set! buf0 (clCreateBuffer (context)
                                     '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
                                     (* (ctype-sizeof _cl_float)
-                                       size0)
-                                    (vec->cpointer v0)))
+                                       (- size0 off0))
+                                    (vref-cpointer v0 off0)))
          (set! buf-out (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
                                           size-out)
@@ -284,10 +289,9 @@
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf0)
-         (clSetKernelArg:_cl_int kernel 1 off0)
-         (clSetKernelArg:_cl_int kernel 2 stride0)
-         (clSetKernelArg:_cl_mem kernel 3 buf-out)
-         (clSetKernelArg:_cl_int kernel 4 stride-out))
+         (clSetKernelArg:_cl_int kernel 1 stride0)
+         (clSetKernelArg:_cl_mem kernel 2 buf-out)
+         (clSetKernelArg:_cl_int kernel 3 stride-out))
        (λ ()
          (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
                                              (make-vector 1 (/ size-out stride-out))
@@ -403,11 +407,12 @@
          [event #f])
      (dynamic-wind
        (λ ()
+         ;; Exclude memory consumed by elements before offset of input vector v0
          (set! buf0 (clCreateBuffer (context)
                                     '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
                                     (* (ctype-sizeof _cl_float)
-                                       size0)
-                                    (vec->cpointer v0)))
+                                       (- size0 off0))
+                                    (vref-cpointer v0 off0)))
          (set! buf-z (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
                                           size-z)
@@ -424,10 +429,9 @@
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf-g)
          (clSetKernelArg:_cl_mem kernel 1 buf0)
-         (clSetKernelArg:_cl_int kernel 2 off0)
-         (clSetKernelArg:_cl_int kernel 3 stride0)
-         (clSetKernelArg:_cl_mem kernel 4 buf-z)
-         (clSetKernelArg:_cl_int kernel 5 stride-z))
+         (clSetKernelArg:_cl_int kernel 2 stride0)
+         (clSetKernelArg:_cl_mem kernel 3 buf-z)
+         (clSetKernelArg:_cl_int kernel 4 stride-z))
        (λ ()
          (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
                                              (make-vector 1 (/ size-z stride-z))

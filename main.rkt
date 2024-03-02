@@ -12,9 +12,6 @@
          racket/runtime-path)
 
 (define-runtime-path mult-kernel-file "mult.cl")
-(define-runtime-path sum-1-ρ-kernel-file "sum-1-ρ.cl")
-(define-runtime-path sum-1-∇-kernel-file "sum-1-∇.cl")
-(define-runtime-path dup-1-ρ-kernel-file "dup-1-ρ.cl")
 
 (define context (make-parameter #f))
 (define command-queue (make-parameter #f))
@@ -26,6 +23,85 @@
     (printf "~a " (vref store i)))
   (printf ") ~a)~n" (flat-offset t)))
 
+(define (ext1-ρ-kernel prim1-ρ-f)
+  (string->bytes/utf-8
+   (format
+    #<<EOF
+__kernel void Kernel (__global float* v0,
+                      int stride0,
+                      __global float* v_out,
+                       int stride_out)
+{
+
+    int i_out = get_global_id(0) * stride_out;
+    // offset is handled by the platform API
+    int i0 = 0 + (i_out / stride_out) * stride0;
+    ~a
+
+}
+EOF
+    (prim1-ρ-f #"v0" #"i0" #"stride0"
+               #"v_out" #"i_out" #"stride_out")
+    )))
+
+(define (sum-1-ρ-kernel v0 i0 stride0 v-out i-out stride-out)
+  (string->bytes/utf-8
+   (format
+   #<<EOF
+
+    float sum = 0;
+    for (int i=~a; i < ~a+~a; i++) {
+        sum += ~a[i];
+    }
+    ~a[~a] = sum;
+EOF
+    i0 i0 stride0 v0 v-out i-out)
+))
+
+(define (dup-1-ρ-kernel v0 i0 stride0 v-out i-out stride-out)
+  (string->bytes/utf-8
+   (format
+    #<<EOF
+
+    for (int i=0; i < ~a; i++) {
+        ~a[~a+i] = ~a[~a + (i % ~a)];
+    }
+EOF
+    stride-out v-out i-out v0 i0 stride0)))
+
+(define (ext1-∇-kernel prim1-∇-f)
+  (string->bytes/utf-8
+   (format
+    #<<EOF
+__kernel void Kernel (__global float* g0,
+                      __global float* v0,
+                      int stride0,
+                      __global float* vz,
+                      int stridez)
+{
+
+    int iz = get_global_id(0) * stridez;
+    // offset is handled by the platform API
+    int i0 = 0 + (iz / stridez) * stride0;
+
+    ~a
+}
+EOF
+    (prim1-∇-f #"g0" #"v0" #"i0" #"stride0"
+               #"vz" #"iz" #"stride-z")
+    )))
+
+(define (sum-1-∇-kernel g0 v0 i0 stride0 vz iz stride-z)
+  (string->bytes/utf-8
+   (format
+    #<<EOF
+
+    float z = ~a[~a];
+    for (int i=~a; i < ~a+~a; i++) {
+        ~a[i] += z;
+    }
+EOF
+    vz iz i0 i0 stride0 g0)))
 
 (define (initialize devices device-idx)
   (define device (cvector-ref devices device-idx))
@@ -272,7 +348,7 @@
                     v-out size-out stride-out)
       (flat s-out v-out 0))))
 
-(define (run-prim1-ρ! ker-source
+(define (run-prim1-ρ! prim-kernel-f
                      v0 off0 size0 stride0
                      v-out size-out stride-out)
   (let* ([buf0 #f]
@@ -295,7 +371,7 @@
          (set! program (clCreateProgramWithSource (context)
                                                   (make-vector
                                                    1
-                                                   ker-source)))
+                                                   (ext1-ρ-kernel prim-kernel-f))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf0)
@@ -325,11 +401,11 @@
   (refr st 1))
 
 (define (sum-1-ρ/opencl t)
-  (flat-ext1-ρ (file->bytes sum-1-ρ-kernel-file)
+  (flat-ext1-ρ sum-1-ρ-kernel
                1 sum-shape t))
 
 (define (sum-1-∇/opencl t z)
-  (flat-ext1-∇ (file->bytes sum-1-∇-kernel-file)
+  (flat-ext1-∇ sum-1-∇-kernel
                1 sum-shape t z))
 
 (define sum-1-∇
@@ -368,7 +444,7 @@
 (define dup-ρ (ext1-ρ dup-f 1 dup-shape-f))
 
 (define (dup/opencl t)
-  (flat-ext1-ρ (file->bytes dup-1-ρ-kernel-file)
+  (flat-ext1-ρ dup-1-ρ-kernel
                1 dup-shape-f t))
 (define (dup-test)
   (define t-shape '(10 10 5))
@@ -406,7 +482,7 @@
                     vz size-z stride-z)
       (flat s0 g0 0))))
 
-(define (run-prim1-∇! ker-source g0
+(define (run-prim1-∇! prim-kernel-f g0
                       v0 off0 size0 stride0
                       vz size-z stride-z)
   (let* ([buf0 #f]
@@ -434,7 +510,7 @@
          (set! program (clCreateProgramWithSource (context)
                                                   (make-vector
                                                    1
-                                                   ker-source)))
+                                                   (ext1-∇-kernel prim-kernel-f))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf-g)

@@ -9,9 +9,7 @@
                       "1-flats.rkt"
                       "A-equality.rkt"
                       "D-extend.rkt")
-         racket/runtime-path)
-
-(define-runtime-path mult-kernel-file "mult.cl")
+         string-interpolation)
 
 (define context (make-parameter #f))
 (define command-queue (make-parameter #f))
@@ -24,55 +22,43 @@
   (printf ") ~a)~n" (flat-offset t)))
 
 (define (ext1-ρ-kernel prim1-ρ-f)
-  (string->bytes/utf-8
-   (format
-    #<<EOF
+  #<<EOF
 __kernel void Kernel (__global float* v0,
-                      int stride0,
-                      __global float* v_out,
-                       int stride_out)
+                    int stride0,
+                    __global float* v_out,
+                    int stride_out)
 {
 
     int i_out = get_global_id(0) * stride_out;
     // offset is handled by the platform API
     int i0 = 0 + (i_out / stride_out) * stride0;
-    ~a
+
+@{(prim1-ρ-f "v0" "i0" "stride0" "v_out" "i_out" "stride_out")}
 
 }
 EOF
-    (prim1-ρ-f #"v0" #"i0" #"stride0"
-               #"v_out" #"i_out" #"stride_out")
-    )))
+  )
 
 (define (sum-1-ρ-kernel v0 i0 stride0 v-out i-out stride-out)
-  (string->bytes/utf-8
-   (format
-   #<<EOF
-
+  #<<EOF
     float sum = 0;
-    for (int i=~a; i < ~a+~a; i++) {
-        sum += ~a[i];
+    for (int i=@{i0}; i < @{i0}+@{stride0}; i++) {
+        sum += @{v0}[i];
     }
-    ~a[~a] = sum;
+    @{v-out}[@{i-out}] = sum;
 EOF
-    i0 i0 stride0 v0 v-out i-out)
-))
+  )
 
 (define (dup-1-ρ-kernel v0 i0 stride0 v-out i-out stride-out)
-  (string->bytes/utf-8
-   (format
-    #<<EOF
-
-    for (int i=0; i < ~a; i++) {
-        ~a[~a+i] = ~a[~a + (i % ~a)];
+  #<<EOF
+    for (int i=0; i < @{stride-out}; i++) {
+        @{v-out}[@{i-out}+i] = @{v0}[@{i0} + (i % @{stride0})];
     }
 EOF
-    stride-out v-out i-out v0 i0 stride0)))
+)
 
 (define (ext1-∇-kernel prim1-∇-f)
-  (string->bytes/utf-8
-   (format
-    #<<EOF
+  #<<EOF
 __kernel void Kernel (__global float* g0,
                       __global float* v0,
                       int stride0,
@@ -84,24 +70,115 @@ __kernel void Kernel (__global float* g0,
     // offset is handled by the platform API
     int i0 = 0 + (iz / stridez) * stride0;
 
-    ~a
+@{(prim1-∇-f "g0" "v0" "i0" "stride0"
+                  "vz" "iz" "stride-z")}
 }
 EOF
-    (prim1-∇-f #"g0" #"v0" #"i0" #"stride0"
-               #"vz" #"iz" #"stride-z")
-    )))
+  )
 
 (define (sum-1-∇-kernel g0 v0 i0 stride0 vz iz stride-z)
-  (string->bytes/utf-8
-   (format
-    #<<EOF
-
-    float z = ~a[~a];
-    for (int i=~a; i < ~a+~a; i++) {
-        ~a[i] += z;
+  #<<EOF
+    float z = @{vz}[@{iz}];
+    for (int i=@{i0}; i < @{i0}+@{stride0}; i++) {
+        @{g0}[i] += z;
     }
 EOF
-    vz iz i0 i0 stride0 g0)))
+  )
+
+
+(define (ext2-ρ-kernel prim2-ρ-f generate-idxs)
+  (let-values (((i0-expr i1-expr) (generate-idxs "i_out")))
+    #<<EOF
+__kernel void Kernel (__global float* v0,
+                      int stride0,
+                      __global float* v1,
+                      int stride1,
+                      __global float* v_out,
+                      int stride_out)
+{
+
+    int i_out = get_global_id(0) * stride_out;
+    int i0 = @{i0-expr};
+    int i1 = @{i1-expr};
+
+@{(prim2-ρ-f "v0" "i0" "stride0"
+             "v1" "i1" "stride1"
+             "v_out" "i_out" "stride_out")}
+}
+EOF
+    ))
+
+(define (*-0-0-ρ-kernel v0 i0 stride0
+                        v1 i1 stride1
+                        v-out i-out stride-out)
+  #<<EOF
+    @{v-out}[@{i-out}] = @{v0}[@{i0}] * @{v1}[@{i1}];
+EOF
+  )
+
+(define (concat-base-ρ-kernel v0 i0 stride0
+                              v1 i1 stride1
+                              v-out i-out stride-out)
+  #<<EOF
+    for(int i=0; i < @{stride-out}; i++) {
+        if (i < @{stride0}) {
+            @{v-out}[i+@{i-out}] = @{v0}[i+@{i0}];
+        } else {
+            @{v-out}[i+@{i-out}] = @{v1}[(i-@{stride0})+@{i1}];
+        }
+    }
+EOF
+  )
+
+(define (ext2-∇-kernel prim2-∇-f generate-idxs)
+  (let-values (((i0-expr i1-expr) (generate-idxs "iz")))
+    #<<EOF
+__kernel void Kernel (__global float* g0,
+                      __global float* g1,
+                      __global float* v0,
+                      int stride0,
+                      __global float* v1,
+                      int stride1,
+                      __global float* vz,
+                      int stride_z)
+{
+
+    int iz = get_global_id(0) * stride_z;
+    int i0 = @{i0-expr};
+    int i1 = @{i1-expr};
+
+@{(prim2-∇-f "g0" "g1"
+             "v0" "i0" "stride0"
+             "v1" "i1" "stride1"
+             "vz" "iz" "stride_z")}
+}
+EOF
+    ))
+
+(define (*-0-0-∇-kernel g0 g1
+                        v0 i0 stride0
+                        v1 i1 stride1
+                        vz iz stride-z)
+  #<<EOF
+    @{g0}[@{i0}] = @{v1}[@{i1}] * @{vz}[@{iz}];
+    @{g1}[@{i1}] = @{v0}[@{i0}] * @{vz}[@{iz}];
+EOF
+  )
+
+(define (concat-base-∇-kernel g0 g1
+                              v0 i0 stride0
+                              v1 i1 stride1
+                              vz iz stride-z)
+  #<<EOF
+    for(int i=0; i < @{stride-z}; i++) {
+        if (i < @{stride0}) {
+            @{g0}[i+@{i0}] += @{vz}[i+@{iz}];
+        } else {
+            @{g1}[i-@{stride0}+@{i1}] += @{vz}[i+@{iz}];
+        }
+    }
+EOF
+  )
 
 (define (initialize devices device-idx)
   (define device (cvector-ref devices device-idx))
@@ -183,33 +260,40 @@ EOF
                         (cpointer-has-tag? in-buf 'cl_mem))
                (clReleaseMemObject in-buf))))))))
 
-(define (*/opencl t1 t2)
-  (run/opencl (vector t1 t2)
-              (vector 0 1)
-              (shape t1)
-              (file->bytes mult-kernel-file)
-              #"Mult"))
+(define (*-ρ/opencl t1 t2)
+  (flat-ext2-ρ *-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
 
-(define (number->bytes n)
-  (string->bytes/utf-8 (number->string n)))
+(define (*-∇/opencl t1 t2 z)
+  (flat-ext2-∇ *-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
+
+(define concat-shape
+  (λ (st su)
+    (cons (+ (ref st 0) (ref su 0))
+          (cdr st))))
+
+(define (concat-ρ/opencl t1 t2)
+  (flat-ext2-ρ concat-base-ρ-kernel 1 1 concat-shape t1 t2))
+
+(define (concat-∇/opencl t1 t2 z)
+  (flat-ext2-∇ concat-base-∇-kernel 1 1 concat-shape t1 t2 z))
 
 (define (binary-expr rator rand1 rand2)
-  (bytes-append #"(" rand1 #" " rator #" " rand2 #")"))
+  (string-append "(" rand1 " " rator " " rand2 ")"))
 
 (define idx-exprs-gen
   (λ (strides i0 i1)
     (λ (out-i)
-      (for/fold ([i0 (number->bytes i0)]
-                 [i1 (number->bytes i1)]
+      (for/fold ([i0 (number->string i0)]
+                 [i1 (number->string i1)]
                  [x out-i] #:result (values i0 i1))
                 ([stride strides])
-        (let ((stride-out (number->bytes (vector-ref stride 0)))
-              (stride0 (number->bytes (vector-ref stride 1)))
-              (stride1 (number->bytes (vector-ref stride 2))))
-          (let ((idx (binary-expr #"/" x stride-out))
-                (next-x (binary-expr #"%" x stride-out)))
-            (values (binary-expr #"+" i0 (binary-expr #"*" idx stride0))
-                    (binary-expr #"+" i1 (binary-expr #"*" idx stride1))
+        (let ((stride-out (number->string (vector-ref stride 0)))
+              (stride0 (number->string (vector-ref stride 1)))
+              (stride1 (number->string (vector-ref stride 2))))
+          (let ((idx (binary-expr "/" x stride-out))
+                (next-x (binary-expr "%" x stride-out)))
+            (values (binary-expr "+" i0 (binary-expr "*" idx stride0))
+                    (binary-expr "+" i1 (binary-expr "*" idx stride1))
                     next-x)))))))
 
 (define flat-ext2-ρ
@@ -217,11 +301,13 @@ EOF
     (let* ((s0 (flat-shape t0))
            (v0 (flat-store t0))
            (off0 (flat-offset t0))
+           (size0 (size-of s0))
            (sf0 (min-shape r0 s0))
 
            (s1 (flat-shape t1))
            (v1 (flat-store t1))
            (off1 (flat-offset t1))
+           (size1 (size-of s1))
            (sf1 (min-shape r1 s1))
 
            (sf-out (shape-fn sf0 sf1))
@@ -231,23 +317,210 @@ EOF
       (ext2-shapes
        s0 s1 r0 r1 sf-out
        (λ (s-out size-out q0 q1 strides)
-         (let ((out-v (make-vector size-out 0.0))
-               (gen-exprs (idx-exprs-gen strides off0 off1)))
-           (printf "General Expressions:~n")
-           (define-values (i0-expr i1-expr) (gen-exprs #"i-out"))
-           (printf "i0 = ~a~n" i0-expr)
-           (printf "i1 = ~a~n~n" i1-expr)
-           (for ([out-i (in-range 0 size-out stride-out)])
-             (let-values (((i0 i1)
-                           (idxs strides out-i off0 off1))
-                          ((i0-expr i1-expr)
-                           (gen-exprs (number->bytes out-i))))
-               (printf "~a = ~a ~n" i0 i0-expr)
-               (printf "~a = ~a ~n" i1 i1-expr)
-               #;
-               (f v0 i0 stride0 v1 i1 stride1 out-v (+ 0 out-i) stride-out)))
-           ;; TODO: Figure out a way to compose the kernel source code using idx-exprs-gen, and then run it.
+         (let ((out-v (new-vec size-out 0.0)))
+           #;
+           (begin
+             (printf "General Expressions:~n")
+             (define-values (i0-expr i1-expr) (gen-exprs #"i-out"))
+             (printf "i0 = ~a~n" i0-expr)
+             (printf "i1 = ~a~n~n" i1-expr)
+             (for ([out-i (in-range 0 size-out stride-out)])
+               (let-values (((i0 i1)
+                             (idxs strides out-i off0 off1))
+                            ((i0-expr i1-expr)
+                             (gen-exprs (number->string out-i))))
+                 (printf "~a = ~a ~n" i0 i0-expr)
+                 (printf "~a = ~a ~n" i1 i1-expr)
+                 #;
+                 (f v0 i0 stride0 v1 i1 stride1 out-v (+ 0 out-i) stride-out))))
+           (run-prim2-ρ! f strides
+                         v0 off0 size0 stride0
+                         v1 off1 size1 stride1
+                         out-v size-out stride-out)
            (flat s-out out-v 0)))))))
+
+(define (run-prim2-ρ! prim-kernel-f strides
+                      v0 off0 size0 stride0
+                      v1 off1 size1 stride1
+                      v-out size-out stride-out)
+  (let* ([buf0 #f]
+         [buf1 #f]
+         [buf-out #f]
+         [program #f]
+         [kernel #f]
+         [event #f])
+     (dynamic-wind
+       (λ ()
+         ;; Exclude memory consumed by elements before offset of input vector v0
+         (set! buf0 (clCreateBuffer (context)
+                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    (* (ctype-sizeof _cl_float)
+                                       size0)
+                                    (vref-cpointer v0 off0)))
+         (set! buf1 (clCreateBuffer (context)
+                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    (* (ctype-sizeof _cl_float)
+                                       size1)
+                                    (vref-cpointer v1 off1)))
+         (set! buf-out (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                       (* (ctype-sizeof _cl_float)
+                                          size-out)
+                                       #f))
+         (set! program (clCreateProgramWithSource
+                        (context)
+                        (make-vector
+                         1
+                         (string->bytes/utf-8
+                          (ext2-ρ-kernel prim-kernel-f
+                                         (idx-exprs-gen strides 0 0))))))
+         (clBuildProgram program (make-vector 0) (make-bytes 0))
+         (set! kernel (clCreateKernel program #"Kernel"))
+         (clSetKernelArg:_cl_mem kernel 0 buf0)
+         (clSetKernelArg:_cl_int kernel 1 stride0)
+         (clSetKernelArg:_cl_mem kernel 2 buf1)
+         (clSetKernelArg:_cl_int kernel 3 stride1)
+         (clSetKernelArg:_cl_mem kernel 4 buf-out)
+         (clSetKernelArg:_cl_int kernel 5 stride-out))
+       (λ ()
+         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                             (make-vector 1 (/ size-out stride-out))
+                                             (make-vector 0)
+                                             (make-vector 0)))
+         (set! event (clEnqueueReadBuffer (command-queue) buf-out 'CL_TRUE 0
+                                          (* (ctype-sizeof _cl_float)
+                                             size-out)
+                                          (vec->cpointer v-out) (vector event))))
+       (λ ()
+         (when kernel
+           (clReleaseKernel kernel))
+         (when program
+           (clReleaseProgram program))
+         (when buf-out
+           (clReleaseMemObject buf-out))
+         (when buf1
+           (clReleaseMemObject buf1))
+         (when buf0
+           (clReleaseMemObject buf0))))))
+
+(define flat-ext2-∇
+  (λ (fᵈ r0 r1 shape-fn t0 t1 z)
+    (let* ((s0 (flat-shape t0))
+           (v0 (flat-store t0))
+           (off0 (flat-offset t0))
+           (size0 (size-of s0))
+           (sf0 (min-shape r0 s0))
+           (stride0 (size-of sf0))
+
+           (s1 (flat-shape t1))
+           (v1 (flat-store t1))
+           (off1 (flat-offset t1))
+           (size1 (size-of s1))
+           (sf1 (min-shape r1 s1))
+           (stride1 (size-of sf1))
+
+           (sf-z (shape-fn sf0 sf1))
+           (stride-z (size-of sf-z))
+           (vz (flat-store z))
+           (offz (flat-offset z)))
+      (ext2-shapes s0 s1 r0 r1 sf-z
+        (λ (sz size-z q0 q1 strides)
+          (let ((g0 (new-vec (size-of s0) 0.0))
+                (g1 (new-vec (size-of s1) 0.0)))
+            #;
+            (for ([iz (in-range 0 size-z stride-z)])
+              (let-values (((i0 i1)
+                            (idxs strides iz off0 off1)))
+                (fᵈ g0 g1 v0 i0 stride0 v1 i1 stride1 vz (+ offz iz) stride-z)))
+            (run-prim2-∇! fᵈ strides g0 g1
+                          v0 off0 size0 stride0
+                          v1 off1 size1 stride1
+                          vz offz size-z stride-z)
+            (values (flat s0 g0 0)
+                    (flat s1 g1 0))))))))
+
+(define (run-prim2-∇! prim-kernel-f strides g0 g1
+                      v0 off0 size0 stride0
+                      v1 off1 size1 stride1
+                      vz offz size-z stride-z)
+  (let* ([buf0 #f]
+         [buf1 #f]
+         [buf-z #f]
+         [buf-g0 #f]
+         [buf-g1 #f]
+         [program #f]
+         [kernel #f]
+         [event #f])
+     (dynamic-wind
+       (λ ()
+         ;; Exclude memory consumed by elements before offset of input vector v0
+         (set! buf0 (clCreateBuffer (context)
+                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    (* (ctype-sizeof _cl_float)
+                                       size0)
+                                    (vref-cpointer v0 off0)))
+         (set! buf1 (clCreateBuffer (context)
+                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    (* (ctype-sizeof _cl_float)
+                                       size1)
+                                    (vref-cpointer v1 off1)))
+         (set! buf-z (clCreateBuffer (context)
+                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    (* (ctype-sizeof _cl_float)
+                                       size-z)
+                                    (vref-cpointer vz offz)))
+         (set! buf-g0 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                       (* (ctype-sizeof _cl_float)
+                                          size0)
+                                       #f))
+         (set! buf-g1 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                       (* (ctype-sizeof _cl_float)
+                                          size1)
+                                       #f))
+         (set! program (clCreateProgramWithSource
+                        (context)
+                        (make-vector
+                         1
+                         (string->bytes/utf-8
+                          (ext2-∇-kernel prim-kernel-f
+                                         (idx-exprs-gen strides 0 0))))))
+         (clBuildProgram program (make-vector 0) (make-bytes 0))
+         (set! kernel (clCreateKernel program #"Kernel"))
+         (clSetKernelArg:_cl_mem kernel 0 buf-g0)
+         (clSetKernelArg:_cl_mem kernel 1 buf-g1)
+         (clSetKernelArg:_cl_mem kernel 2 buf0)
+         (clSetKernelArg:_cl_int kernel 3 stride0)
+         (clSetKernelArg:_cl_mem kernel 4 buf1)
+         (clSetKernelArg:_cl_int kernel 5 stride1)
+         (clSetKernelArg:_cl_mem kernel 6 buf-z)
+         (clSetKernelArg:_cl_int kernel 7 stride-z))
+       (λ ()
+         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                             (make-vector 1 (/ size-z stride-z))
+                                             (make-vector 0)
+                                             (make-vector 0)))
+         (set! event (clEnqueueReadBuffer (command-queue) buf-g0 'CL_TRUE 0
+                                          (* (ctype-sizeof _cl_float)
+                                             size0)
+                                          (vec->cpointer g0) (vector event)))
+         (set! event (clEnqueueReadBuffer (command-queue) buf-g1 'CL_TRUE 0
+                                          (* (ctype-sizeof _cl_float)
+                                             size1)
+                                          (vec->cpointer g1) (vector event))))
+       (λ ()
+         (when kernel
+           (clReleaseKernel kernel))
+         (when program
+           (clReleaseProgram program))
+         (when buf-g1
+           (clReleaseMemObject buf-g1))
+         (when buf-g0
+           (clReleaseMemObject buf-g0))
+         (when buf-z
+           (clReleaseMemObject buf-z))
+         (when buf1
+           (clReleaseMemObject buf1))
+         (when buf0
+           (clReleaseMemObject buf0))))))
 
 ;; TODO: For any tensor t0, a shape function shape-fn, minimum rank
 ;; min-rank and associated values derived from them, show that:
@@ -362,7 +635,7 @@ EOF
          (set! buf0 (clCreateBuffer (context)
                                     '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
                                     (* (ctype-sizeof _cl_float)
-                                       (- size0 off0))
+                                       size0)
                                     (vref-cpointer v0 off0)))
          (set! buf-out (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
@@ -371,7 +644,8 @@ EOF
          (set! program (clCreateProgramWithSource (context)
                                                   (make-vector
                                                    1
-                                                   (ext1-ρ-kernel prim-kernel-f))))
+                                                   (string->bytes/utf-8
+                                                    (ext1-ρ-kernel prim-kernel-f)))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf0)
@@ -497,7 +771,7 @@ EOF
          (set! buf0 (clCreateBuffer (context)
                                     '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
                                     (* (ctype-sizeof _cl_float)
-                                       (- size0 off0))
+                                       size0)
                                     (vref-cpointer v0 off0)))
          (set! buf-z (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
@@ -510,7 +784,8 @@ EOF
          (set! program (clCreateProgramWithSource (context)
                                                   (make-vector
                                                    1
-                                                   (ext1-∇-kernel prim-kernel-f))))
+                                                   (string->bytes/utf-8
+                                                    (ext1-∇-kernel prim-kernel-f)))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf-g)
@@ -539,18 +814,56 @@ EOF
          (when buf0
            (clReleaseMemObject buf0))))))
 
-(define (*-test)
-  ;; TODO: make this work for tensors of different ranks. Refer to
-  ;; ext2 code in flat tensors
-  (define t-shape '(100 100 50))
-  (printf "Shape of tensors to be multiplied: ~a~n" t-shape)
-  (define t1 (random-tensor 0 100 t-shape))
-  (define t2 (random-tensor 0 100 t-shape))
+(define *-∇
+  (ext2-∇ (λ (a b z) (values (* b z) (* a z))) 0 0))
+
+(define concat-∇
+  (ext2-∇ (λ (g0 g1 v0 i0 stride0
+                 v1 i1 stride1
+                 vz iz stride-z)
+            (for ([i (in-range 0 stride-z)])
+              (cond
+                ((< i stride0)
+                 (vset! g0 (+ i0 i)
+                        (+ (vref g0 (+ i0 i))
+                           (vref vz (+ iz i)))))
+                (else
+                 (vset! g1 (+ i1 (- i stride0))
+                        (+ (vref g1 (+ i1 (- i stride0)))
+                           (vref vz (+ iz i))))))))
+          1 1))
+
+(define (*-test t-shape1 t-shape2)
+  (printf "Shape of tensors to be multiplied: ~a ~a~n" t-shape1 t-shape2)
+  (define t1 (random-tensor 0 100 t-shape1))
+  (define t2 (random-tensor 0 100 t-shape2))
   (printf "Timing for CPU computation (in ms):~n")
-  (define golden (time (*-ρ t1 t2)))
+  (define golden-ρ (time (*-ρ t1 t2)))
   (printf "Timing for GPU computation (in ms):~n")
-  (define result (time (*/opencl t1 t2)))
-  (check-tensor-equal? result golden))
+  (define result-ρ (time (*-ρ/opencl t1 t2)))
+  (check-tensor-equal? result-ρ golden-ρ)
+  (printf "Timing for CPU computation (in ms):~n")
+  (define-values (golden0-∇ golden1-∇) (time (*-∇ t1 t2 (zeroes golden-ρ))))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇ result1-∇) (time (*-∇/opencl t1 t2 (zeroes result-ρ))))
+  (check-tensor-equal? result0-∇ golden0-∇)
+  (check-tensor-equal? result1-∇ golden1-∇))
+
+(define (concat-test t-shape1 t-shape2)
+  (printf "Shape of tensors to be concatenated: ~a ~a~n" t-shape1 t-shape2)
+  (define t1 (random-tensor 0 100 t-shape1))
+  (define t2 (random-tensor 0 100 t-shape2))
+  (printf "Timing for CPU computation (in ms):~n")
+  (define golden-ρ (time (concat-ρ t1 t2)))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define result-ρ (time (concat-ρ/opencl t1 t2)))
+  (check-tensor-equal? result-ρ golden-ρ)
+  (printf "Timing for CPU computation (in ms):~n")
+  (define-values (golden0-∇ golden1-∇) (time (concat-∇ t1 t2 (zeroes golden-ρ))))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇ result1-∇) (time (concat-∇/opencl t1 t2 (zeroes result-ρ))))
+  (check-tensor-equal? result0-∇ golden0-∇)
+  (check-tensor-equal? result1-∇ golden1-∇))
 
 (define (main)
   (let* ([platform (cvector-ref (clGetPlatformIDs:vector) 0)]
@@ -563,7 +876,10 @@ EOF
         (λ ()
           (sum-test)
           (dup-test)
-          (*-test))
+          (*-test '(100 100 50) '(100 100 50))
+          (*-test '(50) '(100 100 50))
+          (*-test '(100 100 50) '(100 50))
+          (concat-test '(100 100 50) '(100 50)))
         cleanup))))
 
 (main)

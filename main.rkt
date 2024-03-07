@@ -13,6 +13,10 @@
 
 (define context (make-parameter #f))
 (define command-queue (make-parameter #f))
+(define shape-scale-factor (make-parameter 1))
+
+(define (scale-shape s)
+  (map (λ (x) (* (shape-scale-factor) x)) s))
 
 (define (debug-print-tensor t message)
   (define store (flat-store t))
@@ -691,7 +695,7 @@ EOF
           (+ (vref g0 i) z))))))
 
 (define (sum-test)
-  (define t-shape '(10 10 500))
+  (define t-shape (scale-shape '(10 10 500)))
   (printf "Shape of tensor to be summed: ~a~n" t-shape)
   (define t (random-tensor 0 100 t-shape))
   (printf "Timing for CPU computation (in ms):~n")
@@ -721,7 +725,7 @@ EOF
   (flat-ext1-ρ dup-1-ρ-kernel
                1 dup-shape-f t))
 (define (dup-test)
-  (define t-shape '(10 10 5))
+  (define t-shape (scale-shape '(100 100 50)))
   (printf "Shape of tensor to be duplicated: ~a~n" t-shape)
   (define t (random-tensor 0 100 t-shape))
   (printf "Timing for CPU computation (in ms):~n")
@@ -834,6 +838,8 @@ EOF
           1 1))
 
 (define (*-test t-shape1 t-shape2)
+  (define t-shape1 (scale-shape t-shape1))
+  (define t-shape2 (scale-shape t-shape2))
   (printf "Shape of tensors to be multiplied: ~a ~a~n" t-shape1 t-shape2)
   (define t1 (random-tensor 0 100 t-shape1))
   (define t2 (random-tensor 0 100 t-shape2))
@@ -850,6 +856,8 @@ EOF
   (check-tensor-equal? result1-∇ golden1-∇))
 
 (define (concat-test t-shape1 t-shape2)
+  (define t-shape1 (scale-shape t-shape1))
+  (define t-shape2 (scale-shape t-shape2))
   (printf "Shape of tensors to be concatenated: ~a ~a~n" t-shape1 t-shape2)
   (define t1 (random-tensor 0 100 t-shape1))
   (define t2 (random-tensor 0 100 t-shape2))

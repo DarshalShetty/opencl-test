@@ -174,12 +174,11 @@ EOF
                               v1 i1 stride1
                               vz iz stride-z)
   #<<EOF
-    for(int i=0; i < @{stride-z}; i++) {
-        if (i < @{stride0}) {
-            @{g0}[i+@{i0}] += @{vz}[i+@{iz}];
-        } else {
-            @{g1}[i-@{stride0}+@{i1}] += @{vz}[i+@{iz}];
-        }
+    for(int i=0; i < @{stride0}; i++) {
+        @{g0}[i+@{i0}] += @{vz}[i+@{iz}];
+    }
+    for(int i=@{stride0}; i < @{stride-z}; i++) {
+        @{g1}[i-@{stride0}+@{i1}] += @{vz}[i+@{iz}];
     }
 EOF
   )

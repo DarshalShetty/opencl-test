@@ -13,9 +13,12 @@
 (provide compareArrays)
 (provide random-tensor)
 (provide zeroes)
+(provide one-like)
 
 (define (zeroes t)
   (build-tensor (shape t) (λ (_) 0.0)))
+(define (one-like t)
+  (build-tensor (shape t) (λ (_) 1.0)))
 
 (define (random-tensor min max s)
   (build-tensor s (λ (i) (random min max))))

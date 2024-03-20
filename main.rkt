@@ -120,6 +120,14 @@ EOF
 EOF
   )
 
+(define (+-0-0-ρ-kernel v0 i0 stride0
+                        v1 i1 stride1
+                        v-out i-out stride-out)
+  #<<EOF
+    @{v-out}[@{i-out}] = @{v0}[@{i0}] + @{v1}[@{i1}];
+EOF
+  )
+
 (define (concat-base-ρ-kernel v0 i0 stride0
                               v1 i1 stride1
                               v-out i-out stride-out)
@@ -164,8 +172,18 @@ EOF
                         v1 i1 stride1
                         vz iz stride-z)
   #<<EOF
-    @{g0}[@{i0}] = @{v1}[@{i1}] * @{vz}[@{iz}];
-    @{g1}[@{i1}] = @{v0}[@{i0}] * @{vz}[@{iz}];
+    @{g0}[@{i0}] += @{v1}[@{i1}] * @{vz}[@{iz}];
+    @{g1}[@{i1}] += @{v0}[@{i0}] * @{vz}[@{iz}];
+EOF
+  )
+
+(define (+-0-0-∇-kernel g0 g1
+                        v0 i0 stride0
+                        v1 i1 stride1
+                        vz iz stride-z)
+  #<<EOF
+    @{g0}[@{i0}] += @{vz}[@{iz}];
+    @{g1}[@{i1}] += @{vz}[@{iz}];
 EOF
   )
 
@@ -266,8 +284,14 @@ EOF
 (define (*-ρ/opencl t1 t2)
   (flat-ext2-ρ *-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
 
+(define (+-ρ/opencl t1 t2)
+  (flat-ext2-ρ +-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
+
 (define (*-∇/opencl t1 t2 z)
   (flat-ext2-∇ *-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
+
+(define (+-∇/opencl t1 t2 z)
+  (flat-ext2-∇ +-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
 
 (define concat-shape
   (λ (st su)
@@ -453,6 +477,8 @@ EOF
          [program #f]
          [kernel #f]
          [event #f])
+    ;(printf "###vz=~a" (with-output-to-string (λ () (print-vec vz))))
+    (printf "###offz=~a, size-z=~a, stride-z=~a~n" offz size-z stride-z)
      (dynamic-wind
        (λ ()
          ;; Exclude memory consumed by elements before offset of input vector v0
@@ -479,6 +505,9 @@ EOF
                                        (* (ctype-sizeof _cl_float)
                                           size1)
                                        #f))
+         (printf "###Source:~n~a~n"
+                 (ext2-∇-kernel prim-kernel-f
+                                (idx-exprs-gen strides 0 0)))
          (set! program (clCreateProgramWithSource
                         (context)
                         (make-vector
@@ -703,9 +732,9 @@ EOF
   (define result-ρ (time (sum-1-ρ/opencl t)))
   (check-tensor-equal? result-ρ golden-ρ)
   (printf "Timing for CPU computation (in ms):~n")
-  (define golden-∇ (time ((ext1-∇ sum-1-∇ 1 sum-shape) t (zeroes golden-ρ))))
+  (define golden-∇ (time ((ext1-∇ sum-1-∇ 1 sum-shape) t (one-like golden-ρ))))
   (printf "Timing for GPU computation (in ms):~n")
-  (define result-∇ (time (sum-1-∇/opencl t (zeroes result-ρ))))
+  (define result-∇ (time (sum-1-∇/opencl t (one-like result-ρ))))
   (check-tensor-equal? result-∇ golden-∇))
 
 (define dup-f
@@ -776,14 +805,16 @@ EOF
                                     (* (ctype-sizeof _cl_float)
                                        size0)
                                     (vref-cpointer v0 off0)))
-         (set! buf-z (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
-                                       (* (ctype-sizeof _cl_float)
-                                          size-z)
-                                       #f))
+         (set! buf-z (clCreateBuffer (context)
+                                         '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                         (* (ctype-sizeof _cl_float)
+                                            size-z)
+                                         (vec->cpointer vz)))
          (set! buf-g (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
                                           size0)
                                        #f))
+
          (set! program (clCreateProgramWithSource (context)
                                                   (make-vector
                                                    1
@@ -820,6 +851,9 @@ EOF
 (define *-∇
   (ext2-∇ (λ (a b z) (values (* b z) (* a z))) 0 0))
 
+(define +-∇
+  (ext2-∇ (λ (a b z) (values z z)) 0 0))
+
 (define concat-∇
   (ext2-∇ (λ (g0 g1 v0 i0 stride0
                  v1 i1 stride1
@@ -848,9 +882,9 @@ EOF
   (define result-ρ (time (*-ρ/opencl t1 t2)))
   (check-tensor-equal? result-ρ golden-ρ)
   (printf "Timing for CPU computation (in ms):~n")
-  (define-values (golden0-∇ golden1-∇) (time (*-∇ t1 t2 (zeroes golden-ρ))))
+  (define-values (golden0-∇ golden1-∇) (time (*-∇ t1 t2 (one-like golden-ρ))))
   (printf "Timing for GPU computation (in ms):~n")
-  (define-values (result0-∇ result1-∇) (time (*-∇/opencl t1 t2 (zeroes result-ρ))))
+  (define-values (result0-∇ result1-∇) (time (*-∇/opencl t1 t2 (one-like result-ρ))))
   (check-tensor-equal? result0-∇ golden0-∇)
   (check-tensor-equal? result1-∇ golden1-∇))
 
@@ -866,9 +900,34 @@ EOF
   (define result-ρ (time (concat-ρ/opencl t1 t2)))
   (check-tensor-equal? result-ρ golden-ρ)
   (printf "Timing for CPU computation (in ms):~n")
-  (define-values (golden0-∇ golden1-∇) (time (concat-∇ t1 t2 (zeroes golden-ρ))))
+  (define-values (golden0-∇ golden1-∇) (time (concat-∇ t1 t2 (one-like golden-ρ))))
   (printf "Timing for GPU computation (in ms):~n")
-  (define-values (result0-∇ result1-∇) (time (concat-∇/opencl t1 t2 (zeroes result-ρ))))
+  (define-values (result0-∇ result1-∇) (time (concat-∇/opencl t1 t2 (one-like result-ρ))))
+  (check-tensor-equal? result0-∇ golden0-∇)
+  (check-tensor-equal? result1-∇ golden1-∇))
+
+
+(define (+-test t-shape1^ t-shape2^)
+  (define t-shape1 (scale-shape t-shape1^))
+  (define t-shape2 (scale-shape t-shape2^))
+  (printf "Shape of tensors to be added: ~a ~a~n" t-shape1 t-shape2)
+  (define t1 (random-tensor 0 100 t-shape1))
+  (define t2 (random-tensor 0 100 t-shape2))
+  (printf "Timing for CPU computation (in ms):~n")
+  (define golden-ρ (time (+-ρ t1 t2)))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define result-ρ (time (+-ρ/opencl t1 t2)))
+  (check-tensor-equal? result-ρ golden-ρ)
+  (printf "Timing for CPU computation (in ms):~n")
+  (define-values (golden0-∇ golden1-∇) (time (+-∇ t1 t2 (one-like golden-ρ))))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇ result1-∇) (time (+-∇/opencl t1 t2 (one-like result-ρ))))
+  (printf "###result0-∇=~a, golden0-∇=~a~n"
+          (with-output-to-string (λ () (print-vec (flat-store result0-∇))))
+          (with-output-to-string (λ () (print-vec (flat-store golden0-∇)))))
+  (printf "###result1-∇=~a, golden1-∇=~a~n"
+          (with-output-to-string (λ () (print-vec (flat-store result1-∇))))
+          (with-output-to-string (λ () (print-vec (flat-store golden1-∇)))))
   (check-tensor-equal? result0-∇ golden0-∇)
   (check-tensor-equal? result1-∇ golden1-∇))
 
@@ -886,7 +945,9 @@ EOF
           (*-test '(100 100 50) '(100 100 50))
           (*-test '(50) '(100 100 50))
           (*-test '(100 100 50) '(100 50))
-          (concat-test '(100 100 50) '(100 50)))
+          (+-test '(3) '(2 3))
+          (concat-test '(100 100 50) '(100 50))
+          (concat-test '(3) '(2 3)))
         cleanup))))
 
 (main)

@@ -1,6 +1,7 @@
 #lang racket
 (require ffi/cvector
          ffi/unsafe
+         rackunit
          opencl/c
          "utils.rkt"
          malt/uniform-tensors/no-overrides
@@ -15,15 +16,106 @@
 (define command-queue (make-parameter #f))
 (define shape-scale-factor (make-parameter 1))
 
+(define (clSetKernelArgs kernel args)
+  (for ([i (in-range (length args))])
+    (match-define (list type-fn arg) (list-ref args i))
+    #;(printf "###Kernel arg ~a: ~a~n" i arg)
+    (type-fn kernel i arg)))
+
 (define (scale-shape s)
   (map (λ (x) (* (shape-scale-factor) x)) s))
 
 (define (debug-print-tensor t message)
   (define store (flat-store t))
-  (printf "### ~a: (flat ~a '(" message (flat-shape t))
-  (for ((i (in-range (vlen store))))
-    (printf "~a " (vref store i)))
-  (printf ") ~a)~n" (flat-offset t)))
+  (println "### @{message}: (flat '@{(flat-shape t)} @{(with-output-to-string (λ ()
+           (print-vec store)))} @{(flat-offset t)})" ))
+
+(define calc-repeats
+  (λ (s0 s1 r0 r1 s-out r-out)
+    (define size-rep0 (size-of (drop-right s0 r0)))
+    (define size-rep1 (size-of (drop-right s1 r1)))
+    (define size-rep-out (size-of (drop-right s-out r-out)))
+    #;(printf "size-rep0=~a size-rep1=~a size-rep-out-out=~a r-out=~a~n"
+            size-rep0 size-rep1 size-rep-out r-out)
+    (values (/ size-rep-out size-rep0)
+            (/ size-rep-out size-rep1))))
+
+(define idxs-inv
+  (λ (strides i-in off-out i-rep repeats s-out left-in?)
+    (for/fold ([i-out off-out]
+               [dividend-rep i-rep]
+               [predivisor-rep repeats]
+               [x i-in] #:result i-out)
+              ([desc-out s-out] ;; s-out = (append descents-out sf-out)
+               [stride strides])
+      #;(printf "i-out=~a dividend-rep=~a predivisor-rep=~a x=~a desc-out=~a stride=~a~n" i-out dividend-rep predivisor-rep x desc-out stride)
+      (let ((stride-out (vector-ref stride 0))
+            (stride-in (vector-ref stride (if left-in? 1 2))))
+        (cond
+          ((zero? stride-in)
+           (let* ((divisor-rep (quotient predivisor-rep desc-out))
+                  (scaling (quotient dividend-rep divisor-rep))
+                  (next-dividend (remainder dividend-rep divisor-rep)))
+             (values (+ i-out (* scaling stride-out))
+                     next-dividend
+                     divisor-rep
+                     x)))
+          (else
+           (let ((idx (quotient x stride-in))
+                 (next-x (remainder x stride-in)))
+             (values (+ i-out (* idx stride-out))
+                     dividend-rep
+                     predivisor-rep
+                     next-x))))))))
+
+(define (print-ext2-index-info s0 s1 r0 r1 s-out r-out strides idxs0 idxs1)
+  (displayln "####################################")
+  (printf "input shape 0 =~a~n" s0)
+  (printf "input shape 1 =~a~n" s1)
+  (printf "output shape =~a~n" s-out)
+  (define-values (strides-out strides0 strides1)
+    (for/lists (st-o st0 st1)
+               ((stride strides))
+      (values (vector-ref stride 0)
+              (vector-ref stride 1)
+              (vector-ref stride 2))))
+  (printf "strides-out=~a~nstrides0=~a~nstrides1=~a~n"
+          strides-out strides0 strides1)
+  (define-values (repeats0 repeats1) (calc-repeats s0 s1 r0 r1 s-out r-out))
+  (displayln "Output indices corresponding to every index of input 0:")
+  (define prim-stride0 (size-of (min-shape r0 s0)))
+  (for ([i0 (in-range 0 (size-of s0) prim-stride0)])
+    (printf "\tExpected\t~a\t=> ~a~n" i0 (reverse (vector-ref idxs0 i0)))
+    (printf "\tActual\t\t~a\t=> ~a~n"
+            i0
+            (for/list ([i (in-range repeats0)])
+              (idxs-inv strides i0 0 i repeats0 s-out #t))))
+  (displayln "Output indices corresponding to every index of input 1:")
+  (define prim-stride1 (size-of (min-shape r1 s1)))
+  (for ([i1 (in-range 0 (size-of s1) prim-stride1)])
+    (printf "\tExpected\t~a\t=> ~a~n" i1 (reverse (vector-ref idxs1 i1)))
+    (printf "\tActual\t\t~a\t=> ~a~n"
+            i1
+            (for/list ([i (in-range repeats1)])
+              (idxs-inv strides i1 0 i repeats1 s-out #f))))
+  (displayln "####################################"))
+
+(define (check-idxs-in s0 s1 r0 r1 s-out r-out strides idxs0 idxs1)
+  (define-values (repeats0 repeats1) (calc-repeats s0 s1 r0 r1 s-out r-out))
+  (define prim-stride0 (size-of (min-shape r0 s0)))
+  (for ([i0 (in-range 0 (size-of s0) prim-stride0)])
+    (define expected (reverse (vector-ref idxs0 i0)))
+    (define actual
+      (for/list ([i (in-range repeats0)])
+        (idxs-inv strides i0 0 i repeats0 s-out #t)))
+    (check-equal? actual expected))
+  (define prim-stride1 (size-of (min-shape r1 s1)))
+  (for ([i1 (in-range 0 (size-of s1) prim-stride1)])
+    (define expected (reverse (vector-ref idxs1 i1)))
+    (define actual
+      (for/list ([i (in-range repeats1)])
+        (idxs-inv strides i1 0 i repeats1 s-out #f)))
+    (check-equal? actual expected)))
 
 (define (ext1-ρ-kernel prim1-ρ-f)
   #<<EOF
@@ -120,6 +212,16 @@ EOF
 EOF
   )
 
+(define (*-2-1-ρ-kernel v0 i0 stride0
+                        v1 i1 stride1
+                        v-out i-out stride-out)
+  #<<EOF
+    for(int i=0; i < @{stride-out}; i++) {
+        @{v-out}[@{i-out}+i] = @{v0}[@{i0}+i] * @{v1}[@{i1}+i%@{stride1}];
+    }
+EOF
+  )
+
 (define (+-0-0-ρ-kernel v0 i0 stride0
                         v1 i1 stride1
                         v-out i-out stride-out)
@@ -142,8 +244,12 @@ EOF
 EOF
   )
 
-(define (ext2-∇-kernel prim2-∇-f generate-idxs)
-  (let-values (((i0-expr i1-expr) (generate-idxs "iz")))
+(define (ext2-∇-kernel-atomic prim2-∇-f generate-idxs)
+  (let-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
+                                                       "v0" "i0" "stride0"
+                                                       "v1" "i1" "stride1"
+                                                       "vz" "iz" "stride_z"))
+               ((i0-expr i1-expr) (generate-idxs "iz")))
     #<<EOF
 __kernel void Kernel (__global float* g0,
                       __global float* g1,
@@ -158,48 +264,138 @@ __kernel void Kernel (__global float* g0,
     int iz = get_global_id(0) * stride_z;
     int i0 = @{i0-expr};
     int i1 = @{i1-expr};
+    __global float *g;
 
-@{(prim2-∇-f "g0" "g1"
-             "v0" "i0" "stride0"
-             "v1" "i1" "stride1"
-             "vz" "iz" "stride_z")}
+    g = g0;
+@{prim-effect0}
+
+    g = g1;
+@{prim-effect1}
 }
 EOF
     ))
 
-(define (*-0-0-∇-kernel g0 g1
+(define (ext2-∇-kernel-split prim2-∇-f
+                              repeats0 repeats1
+                              generate-idxs
+                              generate-idxs-inv)
+  (let*-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
+                                                        "v0" "i0" "stride0"
+                                                        "v1" "i1" "stride1"
+                                                        "vz" "iz" "stride_z"))
+                ((i0-expr i1-expr) (generate-idxs "iz"))
+                ((iz-expr0 iz-expr1) (generate-idxs-inv "i0" "i1" "i_rep")))
+    (values
+     #<<EOF
+__kernel void Kernel (__global float* g,
+                      __global float* v0,
+                      int stride0,
+                      __global float* v1,
+                      int stride1,
+                      __global float* vz,
+                      int stride_z)
+{
+    int i0 = get_global_id(0) * stride0;
+
+    for(int i_rep=0; i_rep<@{repeats0}; i_rep++) {
+        int iz = @{iz-expr0};
+        int i1 = @{i1-expr};
+
+@{prim-effect0}
+    }
+}
+EOF
+
+     #<<EOF
+__kernel void Kernel (__global float* g,
+                      __global float* v0,
+                      int stride0,
+                      __global float* v1,
+                      int stride1,
+                      __global float* vz,
+                      int stride_z)
+{
+    int i1 = get_global_id(0) * stride1;
+
+    for(int i_rep=0; i_rep<@{repeats1}; i_rep++) {
+        int iz = @{iz-expr1};
+        int i0 = @{i0-expr};
+
+@{prim-effect1}
+    }
+}
+EOF
+     )))
+
+(define (*-0-0-∇-kernel g
+                         v0 i0 stride0
+                         v1 i1 stride1
+                         vz iz stride-z)
+  (values
+   #<<EOF
+    @{g}[@{i0}] += @{v1}[@{i1}] * @{vz}[@{iz}];
+EOF
+
+   #<<EOF
+    @{g}[@{i1}] += @{v0}[@{i0}] * @{vz}[@{iz}];
+EOF
+   ))
+
+(define (*-2-1-∇-kernel g
                         v0 i0 stride0
                         v1 i1 stride1
                         vz iz stride-z)
-  #<<EOF
-    @{g0}[@{i0}] += @{v1}[@{i1}] * @{vz}[@{iz}];
-    @{g1}[@{i1}] += @{v0}[@{i0}] * @{vz}[@{iz}];
+  (values
+   #<<EOF
+    for(int i=0; i<@{stride-z}; i++) {
+        float b = @{v1}[@{i1}+i%@{stride1}];
+        float z = @{vz}[@{iz}+i];
+        @{g}[@{i0}+i] += z * b;
+    }
 EOF
+
+   #<<EOF
+    for(int i=0; i<@{stride-z}; i++) {
+        float a = @{v0}[@{i0}+i];
+        float z = @{vz}[@{iz}+i];
+        @{g}[@{i1}+i%@{stride1}] += z * a;
+    }
+EOF
+   )
   )
 
-(define (+-0-0-∇-kernel g0 g1
+(define (+-0-0-∇-kernel g
                         v0 i0 stride0
                         v1 i1 stride1
                         vz iz stride-z)
-  #<<EOF
-    @{g0}[@{i0}] += @{vz}[@{iz}];
-    @{g1}[@{i1}] += @{vz}[@{iz}];
+  (values
+   #<<EOF
+    @{g}[@{i0}] += @{vz}[@{iz}];
 EOF
-  )
 
-(define (concat-base-∇-kernel g0 g1
+   #<<EOF
+    @{g}[@{i1}] += @{vz}[@{iz}];
+EOF
+   ))
+
+
+(define (concat-base-∇-kernel g
                               v0 i0 stride0
                               v1 i1 stride1
                               vz iz stride-z)
-  #<<EOF
+  (values
+   #<<EOF
     for(int i=0; i < @{stride0}; i++) {
-        @{g0}[i+@{i0}] += @{vz}[i+@{iz}];
-    }
-    for(int i=@{stride0}; i < @{stride-z}; i++) {
-        @{g1}[i-@{stride0}+@{i1}] += @{vz}[i+@{iz}];
+        @{g}[i+@{i0}] += @{vz}[i+@{iz}];
     }
 EOF
-  )
+
+   #<<EOF
+    for(int i=@{stride0}; i < @{stride-z}; i++) {
+        @{g}[i-@{stride0}+@{i1}] += @{vz}[i+@{iz}];
+    }
+EOF
+   ))
 
 (define (initialize devices device-idx)
   (define device (cvector-ref devices device-idx))
@@ -284,11 +480,21 @@ EOF
 (define (*-ρ/opencl t1 t2)
   (flat-ext2-ρ *-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
 
+(define *-2-1-shape
+  (λ (s t)
+    s))
+
+(define (*-2-1-ρ/opencl t1 t2)
+  (flat-ext2-ρ *-2-1-ρ-kernel 2 1 *-2-1-shape t1 t2))
+
 (define (+-ρ/opencl t1 t2)
   (flat-ext2-ρ +-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
 
 (define (*-∇/opencl t1 t2 z)
   (flat-ext2-∇ *-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
+
+(define (*-2-1-∇/opencl t1 t2 z)
+  (flat-ext2-∇ *-2-1-∇-kernel 2 1 *-2-1-shape t1 t2 z))
 
 (define (+-∇/opencl t1 t2 z)
   (flat-ext2-∇ +-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
@@ -307,12 +513,12 @@ EOF
 (define (binary-expr rator rand1 rand2)
   (string-append "(" rand1 " " rator " " rand2 ")"))
 
-(define idx-exprs-gen
+(define idx-exprs
   (λ (strides i0 i1)
-    (λ (out-i)
+    (λ (i-out-var-str)
       (for/fold ([i0 (number->string i0)]
                  [i1 (number->string i1)]
-                 [x out-i] #:result (values i0 i1))
+                 [x i-out-var-str] #:result (values i0 i1))
                 ([stride strides])
         (let ((stride-out (number->string (vector-ref stride 0)))
               (stride0 (number->string (vector-ref stride 1)))
@@ -322,6 +528,51 @@ EOF
             (values (binary-expr "+" i0 (binary-expr "*" idx stride0))
                     (binary-expr "+" i1 (binary-expr "*" idx stride1))
                     next-x)))))))
+
+(define idx-exprs-inv
+  (λ (strides i-out repeats0 repeats1 s-out)
+    (λ (i0-var-str i1-var-str i-rep-var-str)
+      (let ((gen-expr
+             (λ (i-in-var-str stride-i repeats)
+               (for/fold ([i-out (number->string i-out)]
+                          [dividend-rep i-rep-var-str]
+                          [predivisor-rep repeats]
+                          [x i-in-var-str] #:result i-out)
+                         ([desc-out s-out] ;; s-out = (append descents-out sf-out)
+                          [stride strides])
+                 #;(printf "i-out=~a dividend-rep=~a predivisor-rep=~a x=~a desc-out=~a stride=~a~n"
+                           i-out dividend-rep predivisor-rep x desc-out stride)
+                 (let ((stride-out (vector-ref stride 0))
+                       (stride-in (vector-ref stride stride-i)))
+                   (cond
+                     ((zero? stride-in)
+                      (let* ((divisor-rep (quotient predivisor-rep desc-out))
+                             (divisor-rep-str (number->string divisor-rep))
+                             (scaling (binary-expr "/" dividend-rep divisor-rep-str))
+                             (next-dividend (binary-expr "%"
+                                                         dividend-rep
+                                                         divisor-rep-str)))
+                        (values (binary-expr "+" i-out
+                                             (binary-expr "*"
+                                                          scaling
+                                                          (number->string
+                                                           stride-out)))
+                                next-dividend
+                                divisor-rep
+                                x)))
+                     (else
+                      (let ((stride-in-str (number->string stride-in)))
+                        (let ((idx (binary-expr "/" x stride-in-str))
+                              (next-x (binary-expr "%" x stride-in-str)))
+                          (values (binary-expr "+" i-out
+                                               (binary-expr "*" idx
+                                                            (number->string
+                                                             stride-out)))
+                                  dividend-rep
+                                  predivisor-rep
+                                  next-x))))))))))
+        (values (gen-expr i0-var-str 1 repeats0)
+                (gen-expr i1-var-str 2 repeats1))))))
 
 (define flat-ext2-ρ
   (λ (f r0 r1 shape-fn t0 t1)
@@ -343,7 +594,8 @@ EOF
            (stride-out (size-of sf-out)))
       (ext2-shapes
        s0 s1 r0 r1 sf-out
-       (λ (s-out size-out q0 q1 strides)
+       (λ (s-out size-out q0 q1 strides parallel-desc?)
+         #;(printf "###sz=~a, size-z=~a, q0=~a, q1=~a, strides=~a~n" s-out size-out q0 q1 strides)
          (let ((out-v (new-vec size-out 0.0)))
            #;
            (begin
@@ -360,13 +612,13 @@ EOF
                  (printf "~a = ~a ~n" i1 i1-expr)
                  #;
                  (f v0 i0 stride0 v1 i1 stride1 out-v (+ 0 out-i) stride-out))))
-           (run-prim2-ρ! f strides
+           (run-prim2-ρ! (ext2-ρ-kernel f (idx-exprs strides 0 0))
                          v0 off0 size0 stride0
                          v1 off1 size1 stride1
                          out-v size-out stride-out)
            (flat s-out out-v 0)))))))
 
-(define (run-prim2-ρ! prim-kernel-f strides
+(define (run-prim2-ρ! kernel-code
                       v0 off0 size0 stride0
                       v1 off1 size1 stride1
                       v-out size-out stride-out)
@@ -397,9 +649,7 @@ EOF
                         (context)
                         (make-vector
                          1
-                         (string->bytes/utf-8
-                          (ext2-ρ-kernel prim-kernel-f
-                                         (idx-exprs-gen strides 0 0))))))
+                         (string->bytes/utf-8 kernel-code))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf0)
@@ -429,6 +679,76 @@ EOF
          (when buf0
            (clReleaseMemObject buf0))))))
 
+
+(define ext2-shapes
+  (λ (s0 s1 r0 r1 sf-out k)
+    (let ((l0 (length s0))
+          (l1 (length s1)))
+      (cond
+        ((and (= r0 l0) (= r1 l1))
+           (k sf-out
+              (size-of sf-out)
+              (size-of s0)
+              (size-of s1)
+              '()
+              #t))
+
+        ((= r0 l0)
+         (ext2-shapes s0 (cdr s1) r0 r1 sf-out
+           (desc-right (car s1) k)))
+
+        ((= r1 l1)
+         (ext2-shapes (cdr s0) s1 r0 r1 sf-out
+           (desc-left (car s0) k)))
+
+        ((and (not (null? s0))
+              (not (null? s1))
+              (= (car s0) (car s1)))
+         (ext2-shapes (cdr s0) (cdr s1) r0 r1 sf-out
+           (desc-both (car s0) k)))
+
+        ((> l1 l0)
+         (ext2-shapes s0 (cdr s1) r0 r1 sf-out
+           (desc-right (car s1) k)))
+
+        ((> l0 l1)
+         (ext2-shapes (cdr s0) s1 r0 r1 sf-out
+           (desc-left (car s0) k)))
+
+        (else (error 'ext
+               "Shapes are incompatible for ext2: ~a, and ~a for min ranks ~a, and ~a~%"
+               s0 s1 r0 r1))))))
+
+(define desc-both
+  (λ (d k)
+    (λ (s-out qout q0 q1 strides parallel-desc?)
+      (k (cons d s-out)
+         (* qout d)
+         (* q0 d)
+         (* q1 d)
+         (cons (vector qout q0 q1) strides)
+         parallel-desc?))))
+
+(define desc-left
+  (λ (d k)
+    (λ (s-out qout q0 q1 strides parallel-desc?)
+      (k (cons d s-out)
+         (* qout d)
+         (* q0 d)
+         q1
+         (cons (vector qout q0 0) strides)
+         #f))))
+
+(define desc-right
+  (λ (d k)
+    (λ (s-out qout q0 q1 strides parallel-desc?)
+      (k (cons d s-out)
+         (* qout d)
+         q0
+         (* q1 d)
+         (cons (vector qout 0 q1) strides)
+         #f))))
+
 (define flat-ext2-∇
   (λ (fᵈ r0 r1 shape-fn t0 t1 z)
     (let* ((s0 (flat-shape t0))
@@ -450,25 +770,54 @@ EOF
            (vz (flat-store z))
            (offz (flat-offset z)))
       (ext2-shapes s0 s1 r0 r1 sf-z
-        (λ (sz size-z q0 q1 strides)
+        (λ (sz size-z q0 q1 strides parallel-desc?)
           (let ((g0 (new-vec (size-of s0) 0.0))
                 (g1 (new-vec (size-of s1) 0.0)))
             #;
+            (printf "###sz=~a, size-z=~a, q0=~a, q1=~a, strides=~a~n" sz size-z q0 q1 strides)
+            #|
+            (define idxs0 (make-vector (size-of s0) '()))
+            (define idxs1 (make-vector (size-of s1) '()))
             (for ([iz (in-range 0 size-z stride-z)])
               (let-values (((i0 i1)
                             (idxs strides iz off0 off1)))
-                (fᵈ g0 g1 v0 i0 stride0 v1 i1 stride1 vz (+ offz iz) stride-z)))
-            (run-prim2-∇! fᵈ strides g0 g1
-                          v0 off0 size0 stride0
-                          v1 off1 size1 stride1
-                          vz offz size-z stride-z)
+                (vector-set! idxs0 i0 (cons iz (vector-ref idxs0 i0)))
+                (vector-set! idxs1 i1 (cons iz (vector-ref idxs1 i1)))
+                #;(fᵈ g0 g1 v0 i0 stride0 v1 i1 stride1 vz (+ offz iz) stride-z)))
+            (check-idxs-in
+             s0 s1 r0 r1 sz (length sf-z)
+             strides idxs0 idxs1)
+            |#
+            (cond
+              (parallel-desc? (run-prim2-∇-atomic! (ext2-∇-kernel-atomic
+                                              fᵈ (idx-exprs strides 0 0))
+                                             g0 g1
+                                             v0 off0 size0 stride0
+                                             v1 off1 size1 stride1
+                                             vz offz size-z stride-z))
+              (else
+               (let*-values (((repeats0 repeats1) (calc-repeats s0 s1 r0 r1 sz
+                                                                (length sf-z)))
+                             ((kernel-code0 kernel-code1)
+                              (ext2-∇-kernel-split fᵈ repeats0 repeats1
+                                                   (idx-exprs strides 0 0)
+                                                   (idx-exprs-inv strides 0
+                                                                  repeats0
+                                                                  repeats1
+                                                                  sz))))
+                 (run-prim2-∇-split! kernel-code0 kernel-code1
+                                     g0 g1
+                                     v0 off0 size0 stride0
+                                     v1 off1 size1 stride1
+                                     vz offz size-z stride-z))))
+
             (values (flat s0 g0 0)
                     (flat s1 g1 0))))))))
 
-(define (run-prim2-∇! prim-kernel-f strides g0 g1
-                      v0 off0 size0 stride0
-                      v1 off1 size1 stride1
-                      vz offz size-z stride-z)
+(define (run-prim2-∇-atomic! kernel-code g0 g1
+                             v0 off0 size0 stride0
+                             v1 off1 size1 stride1
+                             vz offz size-z stride-z)
   (let* ([buf0 #f]
          [buf1 #f]
          [buf-z #f]
@@ -477,82 +826,146 @@ EOF
          [program #f]
          [kernel #f]
          [event #f])
-    ;(printf "###vz=~a" (with-output-to-string (λ () (print-vec vz))))
-    (printf "###offz=~a, size-z=~a, stride-z=~a~n" offz size-z stride-z)
-     (dynamic-wind
-       (λ ()
-         ;; Exclude memory consumed by elements before offset of input vector v0
-         (set! buf0 (clCreateBuffer (context)
-                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+    #;(printf "###offz=~a, size-z=~a, stride-z=~a~n" offz size-z stride-z)
+    (dynamic-wind
+     (λ ()
+       ;; Exclude memory consumed by elements before offset of input vector v0
+       (set! buf0 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size0)
+                                  (vref-cpointer v0 off0)))
+       (set! buf1 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size1)
+                                  (vref-cpointer v1 off1)))
+       (set! buf-z (clCreateBuffer (context)
+                                   '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                   (* (ctype-sizeof _cl_float)
+                                      size-z)
+                                   (vref-cpointer vz offz)))
+       (set! buf-g0 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                     (* (ctype-sizeof _cl_float)
                                        size0)
-                                    (vref-cpointer v0 off0)))
-         (set! buf1 (clCreateBuffer (context)
-                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                    #f))
+       (set! buf-g1 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                     (* (ctype-sizeof _cl_float)
                                        size1)
-                                    (vref-cpointer v1 off1)))
-         (set! buf-z (clCreateBuffer (context)
-                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
-                                    (* (ctype-sizeof _cl_float)
-                                       size-z)
-                                    (vref-cpointer vz offz)))
-         (set! buf-g0 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
-                                       (* (ctype-sizeof _cl_float)
-                                          size0)
-                                       #f))
-         (set! buf-g1 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
-                                       (* (ctype-sizeof _cl_float)
-                                          size1)
-                                       #f))
-         (printf "###Source:~n~a~n"
-                 (ext2-∇-kernel prim-kernel-f
-                                (idx-exprs-gen strides 0 0)))
-         (set! program (clCreateProgramWithSource
-                        (context)
-                        (make-vector
-                         1
-                         (string->bytes/utf-8
-                          (ext2-∇-kernel prim-kernel-f
-                                         (idx-exprs-gen strides 0 0))))))
-         (clBuildProgram program (make-vector 0) (make-bytes 0))
-         (set! kernel (clCreateKernel program #"Kernel"))
-         (clSetKernelArg:_cl_mem kernel 0 buf-g0)
-         (clSetKernelArg:_cl_mem kernel 1 buf-g1)
-         (clSetKernelArg:_cl_mem kernel 2 buf0)
-         (clSetKernelArg:_cl_int kernel 3 stride0)
-         (clSetKernelArg:_cl_mem kernel 4 buf1)
-         (clSetKernelArg:_cl_int kernel 5 stride1)
-         (clSetKernelArg:_cl_mem kernel 6 buf-z)
-         (clSetKernelArg:_cl_int kernel 7 stride-z))
-       (λ ()
-         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
-                                             (make-vector 1 (/ size-z stride-z))
-                                             (make-vector 0)
-                                             (make-vector 0)))
-         (set! event (clEnqueueReadBuffer (command-queue) buf-g0 'CL_TRUE 0
-                                          (* (ctype-sizeof _cl_float)
-                                             size0)
-                                          (vec->cpointer g0) (vector event)))
-         (set! event (clEnqueueReadBuffer (command-queue) buf-g1 'CL_TRUE 0
-                                          (* (ctype-sizeof _cl_float)
-                                             size1)
-                                          (vec->cpointer g1) (vector event))))
-       (λ ()
-         (when kernel
-           (clReleaseKernel kernel))
-         (when program
-           (clReleaseProgram program))
-         (when buf-g1
-           (clReleaseMemObject buf-g1))
-         (when buf-g0
-           (clReleaseMemObject buf-g0))
-         (when buf-z
-           (clReleaseMemObject buf-z))
-         (when buf1
-           (clReleaseMemObject buf1))
-         (when buf0
-           (clReleaseMemObject buf0))))))
+                                    #f))
+       (set! program (clCreateProgramWithSource
+                      (context)
+                      (make-vector 1 (string->bytes/utf-8 kernel-code))))
+       (clBuildProgram program (make-vector 0) (make-bytes 0))
+       (set! kernel (clCreateKernel program #"Kernel"))
+       (clSetKernelArg:_cl_mem kernel 0 buf-g0)
+       (clSetKernelArg:_cl_mem kernel 1 buf-g1)
+       (clSetKernelArg:_cl_mem kernel 2 buf0)
+       (clSetKernelArg:_cl_int kernel 3 stride0)
+       (clSetKernelArg:_cl_mem kernel 4 buf1)
+       (clSetKernelArg:_cl_int kernel 5 stride1)
+       (clSetKernelArg:_cl_mem kernel 6 buf-z)
+       (clSetKernelArg:_cl_int kernel 7 stride-z))
+     (λ ()
+       (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                           (make-vector 1 (/ size-z stride-z))
+                                           (make-vector 0)
+                                           (make-vector 0)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-g0 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size0)
+                                        (vec->cpointer g0) (vector event)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-g1 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size1)
+                                        (vec->cpointer g1) (vector event))))
+     (λ ()
+       (when kernel
+         (clReleaseKernel kernel))
+       (when program
+         (clReleaseProgram program))
+       (when buf-g1
+         (clReleaseMemObject buf-g1))
+       (when buf-g0
+         (clReleaseMemObject buf-g0))
+       (when buf-z
+         (clReleaseMemObject buf-z))
+       (when buf1
+         (clReleaseMemObject buf1))
+       (when buf0
+         (clReleaseMemObject buf0))))))
+
+(define (run-prim2-∇-split! kernel-code0 kernel-code1 g0 g1
+                            v0 off0 size0 stride0
+                            v1 off1 size1 stride1
+                            vz offz size-z stride-z)
+  (define (run! kernel-code g size-in stride-in)
+    (let* ([buf0 #f]
+         [buf1 #f]
+         [buf-z #f]
+         [buf-g #f]
+         [program #f]
+         [kernel #f]
+         [event #f])
+    (dynamic-wind
+     (λ ()
+       ;; Exclude memory consumed by elements before offset of input vector v0
+       (set! buf0 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size0)
+                                  (vref-cpointer v0 off0)))
+       (set! buf1 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size1)
+                                  (vref-cpointer v1 off1)))
+       (set! buf-z (clCreateBuffer (context)
+                                   '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                   (* (ctype-sizeof _cl_float)
+                                      size-z)
+                                   (vref-cpointer vz offz)))
+       (set! buf-g (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                   (* (ctype-sizeof _cl_float)
+                                      size-in)
+                                   #f))
+       (set! program (clCreateProgramWithSource
+                      (context)
+                      (make-vector 1 (string->bytes/utf-8 kernel-code))))
+       (clBuildProgram program (make-vector 0) (make-bytes 0))
+       (set! kernel (clCreateKernel program #"Kernel"))
+       (clSetKernelArgs kernel
+                        `((,clSetKernelArg:_cl_mem ,buf-g)
+                          (,clSetKernelArg:_cl_mem ,buf0)
+                          (,clSetKernelArg:_cl_int ,stride0)
+                          (,clSetKernelArg:_cl_mem ,buf1)
+                          (,clSetKernelArg:_cl_int ,stride1)
+                          (,clSetKernelArg:_cl_mem ,buf-z)
+                          (,clSetKernelArg:_cl_int ,stride-z))))
+     (λ ()
+       (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                           (make-vector 1 (/ size-in stride-in))
+                                           (make-vector 0)
+                                           (make-vector 0)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-g 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size-in)
+                                        (vec->cpointer g) (vector event))))
+     (λ ()
+       (when kernel
+         (clReleaseKernel kernel))
+       (when program
+         (clReleaseProgram program))
+       (when buf-g
+         (clReleaseMemObject buf-g))
+       (when buf-z
+         (clReleaseMemObject buf-z))
+       (when buf1
+         (clReleaseMemObject buf1))
+       (when buf0
+         (clReleaseMemObject buf0))))))
+  (run! kernel-code0 g0 size0 stride0)
+  (run! kernel-code1 g1 size1 stride1))
 
 ;; TODO: For any tensor t0, a shape function shape-fn, minimum rank
 ;; min-rank and associated values derived from them, show that:
@@ -648,12 +1061,12 @@ EOF
       (for ([i-out (in-range 0 size-out stride-out)]
             [i0 (in-range off0 (+ off0 size0) stride0)])
         (f v0 i0 stride0 v-out i-out stride-out))
-      (run-prim1-ρ! f
+      (run-prim1-ρ! (ext1-ρ-kernel f)
                     v0 off0 size0 stride0
                     v-out size-out stride-out)
       (flat s-out v-out 0))))
 
-(define (run-prim1-ρ! prim-kernel-f
+(define (run-prim1-ρ! kernel-code
                      v0 off0 size0 stride0
                      v-out size-out stride-out)
   (let* ([buf0 #f]
@@ -677,7 +1090,7 @@ EOF
                                                   (make-vector
                                                    1
                                                    (string->bytes/utf-8
-                                                    (ext1-ρ-kernel prim-kernel-f)))))
+                                                    kernel-code))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf0)
@@ -783,12 +1196,12 @@ EOF
       (for ([iz (in-range 0 size-z stride-z)]
             [i0 (in-range off0 (+ off0 size0) stride0)])
         (fᵈ g0 v0 i0 stride0 vz iz stride-z))
-      (run-prim1-∇! fᵈ g0
+      (run-prim1-∇! (ext1-∇-kernel fᵈ) g0
                     v0 off0 size0 stride0
                     vz size-z stride-z)
       (flat s0 g0 0))))
 
-(define (run-prim1-∇! prim-kernel-f g0
+(define (run-prim1-∇! kernel-code g0
                       v0 off0 size0 stride0
                       vz size-z stride-z)
   (let* ([buf0 #f]
@@ -819,7 +1232,7 @@ EOF
                                                   (make-vector
                                                    1
                                                    (string->bytes/utf-8
-                                                    (ext1-∇-kernel prim-kernel-f)))))
+                                                    kernel-code))))
          (clBuildProgram program (make-vector 0) (make-bytes 0))
          (set! kernel (clCreateKernel program #"Kernel"))
          (clSetKernelArg:_cl_mem kernel 0 buf-g)
@@ -848,6 +1261,20 @@ EOF
          (when buf0
            (clReleaseMemObject buf0))))))
 
+(define *-2-1-∇
+  (ext2-∇ (λ (g0 g1 v0 i0 stride0
+                 v1 i1 stride1
+                 vz iz stride-z)
+            (for ([i (in-range 0 stride-z)])
+              (let ((a (vref v0 (+ i0 i)))
+                    (b (vref v1 (+ i1 (modulo i stride1))))
+                    (z (vref vz (+ iz i))))
+                (vset! g0 (+ i0 i)
+                       (+ (vref g0 (+ i0 i)) (* z b)))
+                (vset! g1 (+ i1 (modulo  i stride1))
+                       (+ (vref g1 (+ i1 (modulo i stride1))) (* z a))))))
+          2 1 *-2-1-shape))
+
 (define *-∇
   (ext2-∇ (λ (a b z) (values (* b z) (* a z))) 0 0))
 
@@ -868,7 +1295,25 @@ EOF
                  (vset! g1 (+ i1 (- i stride0))
                         (+ (vref g1 (+ i1 (- i stride0)))
                            (vref vz (+ iz i))))))))
-          1 1))
+          1 1 concat-shape))
+
+(define (*-2-1-test t-shape1^ t-shape2^)
+  (define t-shape1 (scale-shape t-shape1^))
+  (define t-shape2 (scale-shape t-shape2^))
+  (printf "Shape of tensors to be *-2-1: ~a ~a~n" t-shape1 t-shape2)
+  (define t1 (random-tensor 0 100 t-shape1))
+  (define t2 (random-tensor 0 100 t-shape2))
+  (printf "Timing for CPU computation (in ms):~n")
+  (define golden-ρ (time (*-2-1-ρ t1 t2)))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define result-ρ (time (*-2-1-ρ/opencl t1 t2)))
+  (check-tensor-equal? result-ρ golden-ρ)
+  (printf "Timing for CPU computation (in ms):~n")
+  (define-values (golden0-∇ golden1-∇) (time (*-2-1-∇ t1 t2 (one-like golden-ρ))))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇ result1-∇) (time (*-2-1-∇/opencl t1 t2 (one-like result-ρ))))
+  (check-tensor-equal? result0-∇ golden0-∇)
+  (check-tensor-equal? result1-∇ golden1-∇))
 
 (define (*-test t-shape1^ t-shape2^)
   (define t-shape1 (scale-shape t-shape1^))
@@ -885,7 +1330,11 @@ EOF
   (define-values (golden0-∇ golden1-∇) (time (*-∇ t1 t2 (one-like golden-ρ))))
   (printf "Timing for GPU computation (in ms):~n")
   (define-values (result0-∇ result1-∇) (time (*-∇/opencl t1 t2 (one-like result-ρ))))
+  #;(debug-print-tensor result0-∇ "result0-∇")
+  #;(debug-print-tensor golden0-∇ "golden0-∇")
   (check-tensor-equal? result0-∇ golden0-∇)
+  #;(debug-print-tensor result1-∇ "result1-∇")
+  #;(debug-print-tensor golden1-∇ "golden1-∇")
   (check-tensor-equal? result1-∇ golden1-∇))
 
 (define (concat-test t-shape1^ t-shape2^)
@@ -922,12 +1371,6 @@ EOF
   (define-values (golden0-∇ golden1-∇) (time (+-∇ t1 t2 (one-like golden-ρ))))
   (printf "Timing for GPU computation (in ms):~n")
   (define-values (result0-∇ result1-∇) (time (+-∇/opencl t1 t2 (one-like result-ρ))))
-  (printf "###result0-∇=~a, golden0-∇=~a~n"
-          (with-output-to-string (λ () (print-vec (flat-store result0-∇))))
-          (with-output-to-string (λ () (print-vec (flat-store golden0-∇)))))
-  (printf "###result1-∇=~a, golden1-∇=~a~n"
-          (with-output-to-string (λ () (print-vec (flat-store result1-∇))))
-          (with-output-to-string (λ () (print-vec (flat-store golden1-∇)))))
   (check-tensor-equal? result0-∇ golden0-∇)
   (check-tensor-equal? result1-∇ golden1-∇))
 
@@ -942,12 +1385,31 @@ EOF
         (λ ()
           (sum-test)
           (dup-test)
+          (+-test '(100 100 50) '(100 100 50))
+          (+-test '(50) '(100 100 50))
+          (+-test '(100 100 50) '(100 50))
+          (+-test '(30) '(20 30))
+          (+-test '(20 30) '(20 30))
+          (+-test '(20 30) '(20 20 30))
+          (+-test '(20 30) '(30 20 30))
+          (+-test '(40) '(30 20 40))
+          (+-test '(20 30 20) '(20 30 30 20))
+          (+-test '(20 30 20) '(20 20 30 30 20))
+          (+-test '(4 20 30 20) '(4 4 20 20 30 30 20))
           (*-test '(100 100 50) '(100 100 50))
           (*-test '(50) '(100 100 50))
           (*-test '(100 100 50) '(100 50))
-          (+-test '(3) '(2 3))
+          (*-test '(30) '(20 30))
+          (*-test '(20 30) '(20 30))
+          (*-test '(20 30) '(20 20 30))
+          (*-test '(20 30) '(30 20 30))
+          (*-test '(40) '(30 20 40))
+          (*-test '(20 30 20) '(20 30 30 20))
+          (*-test '(20 30 20) '(20 20 30 30 20))
+          (*-test '(4 20 30 20) '(4 4 20 20 30 30 20))
+          (*-2-1-test '(30 20 30) '(20 30 10 30))
           (concat-test '(100 100 50) '(100 50))
-          (concat-test '(3) '(2 3)))
+          (concat-test '(20 30) '(40 20 30)))
         cleanup))))
 
 (main)

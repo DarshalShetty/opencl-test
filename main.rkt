@@ -120,14 +120,14 @@
 (define (ext1-ρ-kernel prim1-ρ-f)
   #<<EOF
 __kernel void Kernel (__global float* v0,
-                    int stride0,
-                    __global float* v_out,
-                    int stride_out)
+                      int stride0,
+                      __global float* v_out,
+                      int stride_out)
 {
 
     int i_out = get_global_id(0) * stride_out;
     // offset is handled by the platform API
-    int i0 = 0 + (i_out / stride_out) * stride0;
+    int i0 = (i_out / stride_out) * stride0;
 
 @{(prim1-ρ-f "v0" "i0" "stride0" "v_out" "i_out" "stride_out")}
 
@@ -540,8 +540,6 @@ EOF
                           [x i-in-var-str] #:result i-out)
                          ([desc-out s-out] ;; s-out = (append descents-out sf-out)
                           [stride strides])
-                 #;(printf "i-out=~a dividend-rep=~a predivisor-rep=~a x=~a desc-out=~a stride=~a~n"
-                           i-out dividend-rep predivisor-rep x desc-out stride)
                  (let ((stride-out (vector-ref stride 0))
                        (stride-in (vector-ref stride stride-i)))
                    (cond
@@ -790,11 +788,11 @@ EOF
             |#
             (cond
               (parallel-desc? (run-prim2-∇-atomic! (ext2-∇-kernel-atomic
-                                              fᵈ (idx-exprs strides 0 0))
-                                             g0 g1
-                                             v0 off0 size0 stride0
-                                             v1 off1 size1 stride1
-                                             vz offz size-z stride-z))
+                                                    fᵈ (idx-exprs strides 0 0))
+                                                   g0 g1
+                                                   v0 off0 size0 stride0
+                                                   v1 off1 size1 stride1
+                                                   vz offz size-z stride-z))
               (else
                (let*-values (((repeats0 repeats1) (calc-repeats s0 s1 r0 r1 sz
                                                                 (length sf-z)))
@@ -1067,54 +1065,54 @@ EOF
       (flat s-out v-out 0))))
 
 (define (run-prim1-ρ! kernel-code
-                     v0 off0 size0 stride0
-                     v-out size-out stride-out)
+                      v0 off0 size0 stride0
+                      v-out size-out stride-out)
   (let* ([buf0 #f]
          [buf-out #f]
          [program #f]
          [kernel #f]
          [event #f])
-     (dynamic-wind
-       (λ ()
-         ;; Exclude memory consumed by elements before offset of input vector v0
-         (set! buf0 (clCreateBuffer (context)
-                                    '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
-                                    (* (ctype-sizeof _cl_float)
-                                       size0)
-                                    (vref-cpointer v0 off0)))
-         (set! buf-out (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
-                                       (* (ctype-sizeof _cl_float)
-                                          size-out)
-                                       #f))
-         (set! program (clCreateProgramWithSource (context)
-                                                  (make-vector
-                                                   1
-                                                   (string->bytes/utf-8
-                                                    kernel-code))))
-         (clBuildProgram program (make-vector 0) (make-bytes 0))
-         (set! kernel (clCreateKernel program #"Kernel"))
-         (clSetKernelArg:_cl_mem kernel 0 buf0)
-         (clSetKernelArg:_cl_int kernel 1 stride0)
-         (clSetKernelArg:_cl_mem kernel 2 buf-out)
-         (clSetKernelArg:_cl_int kernel 3 stride-out))
-       (λ ()
-         (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
-                                             (make-vector 1 (/ size-out stride-out))
-                                             (make-vector 0)
-                                             (make-vector 0)))
-         (set! event (clEnqueueReadBuffer (command-queue) buf-out 'CL_TRUE 0
-                                          (* (ctype-sizeof _cl_float)
-                                             size-out)
-                                          (vec->cpointer v-out) (vector event))))
-       (λ ()
-         (when kernel
-           (clReleaseKernel kernel))
-         (when program
-           (clReleaseProgram program))
-         (when buf-out
-           (clReleaseMemObject buf-out))
-         (when buf0
-           (clReleaseMemObject buf0))))))
+    (dynamic-wind
+     (λ ()
+       ;; Exclude memory consumed by elements before offset of input vector v0
+       (set! buf0 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size0)
+                                  (vref-cpointer v0 off0)))
+       (set! buf-out (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                     (* (ctype-sizeof _cl_float)
+                                        size-out)
+                                     #f))
+       (set! program (clCreateProgramWithSource (context)
+                                                (make-vector
+                                                 1
+                                                 (string->bytes/utf-8
+                                                  kernel-code))))
+       (clBuildProgram program (make-vector 0) (make-bytes 0))
+       (set! kernel (clCreateKernel program #"Kernel"))
+       (clSetKernelArg:_cl_mem kernel 0 buf0)
+       (clSetKernelArg:_cl_int kernel 1 stride0)
+       (clSetKernelArg:_cl_mem kernel 2 buf-out)
+       (clSetKernelArg:_cl_int kernel 3 stride-out))
+     (λ ()
+       (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                           (make-vector 1 (/ size-out stride-out))
+                                           (make-vector 0)
+                                           (make-vector 0)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-out 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size-out)
+                                        (vec->cpointer v-out) (vector event))))
+     (λ ()
+       (when kernel
+         (clReleaseKernel kernel))
+       (when program
+         (clReleaseProgram program))
+       (when buf-out
+         (clReleaseMemObject buf-out))
+       (when buf0
+         (clReleaseMemObject buf0))))))
 
 (define (sum-shape st)
   (refr st 1))
@@ -1190,6 +1188,7 @@ EOF
            (sf-z (shape-fn sf0))
            (stride-z (size-of sf-z))
            (vz (flat-store z))
+           (offz (flat-offset z))
 
            (g0 (new-vec size0 0.0)))
       #;
@@ -1198,12 +1197,12 @@ EOF
         (fᵈ g0 v0 i0 stride0 vz iz stride-z))
       (run-prim1-∇! (ext1-∇-kernel fᵈ) g0
                     v0 off0 size0 stride0
-                    vz size-z stride-z)
+                    vz offz size-z stride-z)
       (flat s0 g0 0))))
 
 (define (run-prim1-∇! kernel-code g0
                       v0 off0 size0 stride0
-                      vz size-z stride-z)
+                      vz offz size-z stride-z)
   (let* ([buf0 #f]
          [buf-z #f]
          [buf-g #f]
@@ -1222,7 +1221,7 @@ EOF
                                          '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
                                          (* (ctype-sizeof _cl_float)
                                             size-z)
-                                         (vec->cpointer vz)))
+                                         (vref-cpointer vz offz)))
          (set! buf-g (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
                                        (* (ctype-sizeof _cl_float)
                                           size0)

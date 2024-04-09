@@ -244,12 +244,13 @@ EOF
 EOF
   )
 
-(define (ext2-∇-kernel-atomic prim2-∇-f generate-idxs)
-  (let-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
-                                                       "v0" "i0" "stride0"
-                                                       "v1" "i1" "stride1"
-                                                       "vz" "iz" "stride_z"))
-               ((i0-expr i1-expr) (generate-idxs "iz")))
+(define (ext2-∇-kernel-atomic prim2-∇-f strides)
+  (let*-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
+                                                        "v0" "i0" "stride0"
+                                                        "v1" "i1" "stride1"
+                                                        "vz" "iz" "stride_z"))
+                ((generate-idxs) (idx-exprs strides 0 0))
+                ((i0-expr i1-expr) (generate-idxs "iz")))
     #<<EOF
 __kernel void Kernel (__global float* g0,
                       __global float* g1,
@@ -275,16 +276,21 @@ __kernel void Kernel (__global float* g0,
 EOF
     ))
 
-(define (ext2-∇-kernel-split prim2-∇-f
-                              repeats0 repeats1
-                              generate-idxs
-                              generate-idxs-inv)
+(define (ext2-∇-kernel-split prim2-∇-f strides
+                             s0 s1 r0 r1 s-out r-out)
   (let*-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
                                                         "v0" "i0" "stride0"
                                                         "v1" "i1" "stride1"
                                                         "vz" "iz" "stride_z"))
+                ((repeats0 repeats1) (calc-repeats s0 s1 r0 r1 s-out r-out))
+                ((generate-idxs) (idx-exprs strides 0 0))
+                ((generate-idxs-inv) (idx-exprs-inv strides 0
+                                                    repeats0 repeats1 s-out))
                 ((i0-expr i1-expr) (generate-idxs "iz"))
                 ((iz-expr0 iz-expr1) (generate-idxs-inv "i0" "i1" "i_rep")))
+    ;;TODO: Make a single kernel where global id is based off of the size of the
+    ;;bigger input. If the id gets bigger than the size of the smaller input,
+    ;;then don't execute the loop for the smaller input.
     (values
      #<<EOF
 __kernel void Kernel (__global float* g,
@@ -787,27 +793,21 @@ EOF
              strides idxs0 idxs1)
             |#
             (cond
-              (parallel-desc? (run-prim2-∇-atomic! (ext2-∇-kernel-atomic
-                                                    fᵈ (idx-exprs strides 0 0))
-                                                   g0 g1
-                                                   v0 off0 size0 stride0
-                                                   v1 off1 size1 stride1
-                                                   vz offz size-z stride-z))
-              (else
-               (let*-values (((repeats0 repeats1) (calc-repeats s0 s1 r0 r1 sz
-                                                                (length sf-z)))
-                             ((kernel-code0 kernel-code1)
-                              (ext2-∇-kernel-split fᵈ repeats0 repeats1
-                                                   (idx-exprs strides 0 0)
-                                                   (idx-exprs-inv strides 0
-                                                                  repeats0
-                                                                  repeats1
-                                                                  sz))))
-                 (run-prim2-∇-split! kernel-code0 kernel-code1
-                                     g0 g1
-                                     v0 off0 size0 stride0
-                                     v1 off1 size1 stride1
-                                     vz offz size-z stride-z))))
+                 (parallel-desc?
+                  (run-prim2-∇-atomic! (ext2-∇-kernel-atomic fᵈ strides)
+                                       g0 g1
+                                       v0 off0 size0 stride0
+                                       v1 off1 size1 stride1
+                                       vz offz size-z stride-z))
+                 (else
+                  (let*-values (((kernel-code0 kernel-code1)
+                                 (ext2-∇-kernel-split fᵈ strides s0 s1 r0 r1 sz
+                                                      (length sf-z))))
+                    (run-prim2-∇-split! kernel-code0 kernel-code1
+                                        g0 g1
+                                        v0 off0 size0 stride0
+                                        v1 off1 size1 stride1
+                                        vz offz size-z stride-z))))
 
             (values (flat s0 g0 0)
                     (flat s1 g1 0))))))))

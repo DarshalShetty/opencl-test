@@ -244,6 +244,61 @@ EOF
 EOF
   )
 
+(define (ext2-∇-kernel prim2-∇-f strides
+                       s0 s1 r0 r1 s-out r-out)
+  (let*-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
+                                                        "v0" "i0" "stride0"
+                                                        "v1" "i1" "stride1"
+                                                        "vz" "iz" "stride_z"))
+                ((repeats0 repeats1) (calc-repeats s0 s1 r0 r1 s-out r-out))
+                ((generate-idxs) (idx-exprs strides 0 0))
+                ((generate-idxs-inv) (idx-exprs-inv strides 0
+                                                    repeats0 repeats1 s-out))
+                ((i0-expr i1-expr) (generate-idxs "iz"))
+                ((iz-expr0 iz-expr1) (generate-idxs-inv "i0" "i1" "i_rep")))
+    #<<EOF
+__kernel void Kernel (__global float* g0,
+                      __global float* g1,
+                      __global float* v0,
+                      int stride0,
+                      int size0,
+                      __global float* v1,
+                      int stride1,
+                      int size1,
+                      __global float* vz,
+                      int stride_z)
+{
+    int g_id = get_global_id(0);
+    int i0_g = g_id * stride0;
+    int i1_g = g_id * stride1;
+    __global float *g;
+    int i0, i1, iz;
+
+    if (i0_g < size0) {
+        g = g0;
+        i0 = i0_g;
+        for(int i_rep=0; i_rep<@{repeats0}; i_rep++) {
+            iz = @{iz-expr0};
+            i1 = @{i1-expr};
+
+@{prim-effect0}
+        }
+    }
+
+    if (i1_g < size1) {
+        g = g1;
+        i1 = i1_g;
+        for(int i_rep=0; i_rep<@{repeats1}; i_rep++) {
+            iz = @{iz-expr1};
+            i0 = @{i0-expr};
+
+@{prim-effect1}
+        }
+    }
+}
+EOF
+    ))
+
 (define (ext2-∇-kernel-atomic prim2-∇-f strides)
   (let*-values (((prim-effect0 prim-effect1) (prim2-∇-f "g"
                                                         "v0" "i0" "stride0"
@@ -288,9 +343,6 @@ EOF
                                                     repeats0 repeats1 s-out))
                 ((i0-expr i1-expr) (generate-idxs "iz"))
                 ((iz-expr0 iz-expr1) (generate-idxs-inv "i0" "i1" "i_rep")))
-    ;;TODO: Make a single kernel where global id is based off of the size of the
-    ;;bigger input. If the id gets bigger than the size of the smaller input,
-    ;;then don't execute the loop for the smaller input.
     (values
      #<<EOF
 __kernel void Kernel (__global float* g,
@@ -334,9 +386,9 @@ EOF
      )))
 
 (define (*-0-0-∇-kernel g
-                         v0 i0 stride0
-                         v1 i1 stride1
-                         vz iz stride-z)
+                        v0 i0 stride0
+                        v1 i1 stride1
+                        vz iz stride-z)
   (values
    #<<EOF
     @{g}[@{i0}] += @{v1}[@{i1}] * @{vz}[@{iz}];
@@ -495,6 +547,9 @@ EOF
 
 (define (+-ρ/opencl t1 t2)
   (flat-ext2-ρ +-0-0-ρ-kernel 0 0 (λ _ '()) t1 t2))
+
+(define (*-∇/opencl^ t1 t2 z)
+  (flat-ext2-∇^ *-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
 
 (define (*-∇/opencl t1 t2 z)
   (flat-ext2-∇ *-0-0-∇-kernel 0 0 (λ _ '()) t1 t2 z))
@@ -752,6 +807,142 @@ EOF
          (* q1 d)
          (cons (vector qout 0 q1) strides)
          #f))))
+
+(define flat-ext2-∇^
+  (λ (fᵈ r0 r1 shape-fn t0 t1 z)
+    (let* ((s0 (flat-shape t0))
+           (v0 (flat-store t0))
+           (off0 (flat-offset t0))
+           (size0 (size-of s0))
+           (sf0 (min-shape r0 s0))
+           (stride0 (size-of sf0))
+
+           (s1 (flat-shape t1))
+           (v1 (flat-store t1))
+           (off1 (flat-offset t1))
+           (size1 (size-of s1))
+           (sf1 (min-shape r1 s1))
+           (stride1 (size-of sf1))
+
+           (sf-z (shape-fn sf0 sf1))
+           (stride-z (size-of sf-z))
+           (vz (flat-store z))
+           (offz (flat-offset z)))
+      (ext2-shapes s0 s1 r0 r1 sf-z
+        (λ (sz size-z q0 q1 strides parallel-desc?)
+          (let ((g0 (new-vec (size-of s0) 0.0))
+                (g1 (new-vec (size-of s1) 0.0)))
+            #;
+            (printf "###sz=~a, size-z=~a, q0=~a, q1=~a, strides=~a~n" sz size-z q0 q1 strides)
+            #|
+            (define idxs0 (make-vector (size-of s0) '()))
+            (define idxs1 (make-vector (size-of s1) '()))
+            (for ([iz (in-range 0 size-z stride-z)])
+              (let-values (((i0 i1)
+                            (idxs strides iz off0 off1)))
+                (vector-set! idxs0 i0 (cons iz (vector-ref idxs0 i0)))
+                (vector-set! idxs1 i1 (cons iz (vector-ref idxs1 i1)))
+                #;(fᵈ g0 g1 v0 i0 stride0 v1 i1 stride1 vz (+ offz iz) stride-z)))
+            (check-idxs-in
+             s0 s1 r0 r1 sz (length sf-z)
+             strides idxs0 idxs1)
+            |#
+            (let ((kernel-code (ext2-∇-kernel fᵈ strides s0 s1 r0 r1 sz
+                                              (length sf-z))))
+              (run-prim2-∇! kernel-code
+                            g0 g1
+                            v0 off0 size0 stride0
+                            v1 off1 size1 stride1
+                            vz offz size-z stride-z))
+
+            (values (flat s0 g0 0)
+                    (flat s1 g1 0))))))))
+
+(define (run-prim2-∇! kernel-code g0 g1
+                      v0 off0 size0 stride0
+                      v1 off1 size1 stride1
+                      vz offz size-z stride-z)
+  (let* ([global-work-size (max (/ size0 stride0)
+                                (/ size1 stride1))]
+         [buf0 #f]
+         [buf1 #f]
+         [buf-z #f]
+         [buf-g0 #f]
+         [buf-g1 #f]
+         [program #f]
+         [kernel #f]
+         [event #f])
+    (dynamic-wind
+     (λ ()
+       ;; Exclude memory consumed by elements before offset of input vector v0
+       (set! buf0 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size0)
+                                  (vref-cpointer v0 off0)))
+       (set! buf1 (clCreateBuffer (context)
+                                  '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                  (* (ctype-sizeof _cl_float)
+                                     size1)
+                                  (vref-cpointer v1 off1)))
+       (set! buf-z (clCreateBuffer (context)
+                                   '(CL_MEM_USE_HOST_PTR CL_MEM_READ_ONLY)
+                                   (* (ctype-sizeof _cl_float)
+                                      size-z)
+                                   (vref-cpointer vz offz)))
+       (set! buf-g0 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                   (* (ctype-sizeof _cl_float)
+                                      size0)
+                                   #f))
+       (set! buf-g1 (clCreateBuffer (context) 'CL_MEM_WRITE_ONLY
+                                   (* (ctype-sizeof _cl_float)
+                                      size1)
+                                   #f))
+       #;(printf "###Source:~n~a~n" kernel-code)
+       (set! program (clCreateProgramWithSource
+                      (context)
+                      (make-vector 1 (string->bytes/utf-8 kernel-code))))
+       (clBuildProgram program (make-vector 0) (make-bytes 0))
+       (set! kernel (clCreateKernel program #"Kernel"))
+       (clSetKernelArgs kernel
+                        `((,clSetKernelArg:_cl_mem ,buf-g0)
+                          (,clSetKernelArg:_cl_mem ,buf-g1)
+                          (,clSetKernelArg:_cl_mem ,buf0)
+                          (,clSetKernelArg:_cl_int ,stride0)
+                          (,clSetKernelArg:_cl_int ,size0)
+                          (,clSetKernelArg:_cl_mem ,buf1)
+                          (,clSetKernelArg:_cl_int ,stride1)
+                          (,clSetKernelArg:_cl_int ,size1)
+                          (,clSetKernelArg:_cl_mem ,buf-z)
+                          (,clSetKernelArg:_cl_int ,stride-z))))
+     (λ ()
+       (set! event (clEnqueueNDRangeKernel (command-queue) kernel 1
+                                           (make-vector 1 global-work-size)
+                                           (make-vector 0)
+                                           (make-vector 0)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-g0 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size0)
+                                        (vec->cpointer g0) (vector event)))
+       (set! event (clEnqueueReadBuffer (command-queue) buf-g1 'CL_TRUE 0
+                                        (* (ctype-sizeof _cl_float)
+                                           size1)
+                                        (vec->cpointer g1) (vector event))))
+     (λ ()
+       (when kernel
+         (clReleaseKernel kernel))
+       (when program
+         (clReleaseProgram program))
+       (when buf-g0
+         (clReleaseMemObject buf-g0))
+       (when buf-g1
+         (clReleaseMemObject buf-g1))
+       (when buf-z
+         (clReleaseMemObject buf-z))
+       (when buf1
+         (clReleaseMemObject buf1))
+       (when buf0
+         (clReleaseMemObject buf0))))))
 
 (define flat-ext2-∇
   (λ (fᵈ r0 r1 shape-fn t0 t1 z)
@@ -1314,6 +1505,20 @@ EOF
   (check-tensor-equal? result0-∇ golden0-∇)
   (check-tensor-equal? result1-∇ golden1-∇))
 
+(define (*-test^ t-shape1^ t-shape2^)
+  (define t-shape1 (scale-shape t-shape1^))
+  (define t-shape2 (scale-shape t-shape2^))
+  (printf "Shape of tensors to be multiplied: ~a ~a~n" t-shape1 t-shape2)
+  (define t1 (random-tensor 0 100 t-shape1))
+  (define t2 (random-tensor 0 100 t-shape2))
+  (define result-ρ (*-ρ/opencl t1 t2))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇ result1-∇) (time (*-∇/opencl t1 t2 (one-like result-ρ))))
+  (printf "Timing for GPU computation (in ms):~n")
+  (define-values (result0-∇^ result1-∇^) (time (*-∇/opencl^ t1 t2 (one-like result-ρ))))
+  (check-tensor-equal? result0-∇^ result0-∇)
+  (check-tensor-equal? result1-∇^ result1-∇))
+
 (define (*-test t-shape1^ t-shape2^)
   (define t-shape1 (scale-shape t-shape1^))
   (define t-shape2 (scale-shape t-shape2^))
@@ -1406,6 +1611,8 @@ EOF
           (*-test '(20 30 20) '(20 30 30 20))
           (*-test '(20 30 20) '(20 20 30 30 20))
           (*-test '(4 20 30 20) '(4 4 20 20 30 30 20))
+          (for ((i (in-range 10)))
+            (*-test^ '(4 20 30 20) '(4 4 20 20 30 30 20)))
           (*-2-1-test '(30 20 30) '(20 30 10 30))
           (concat-test '(100 100 50) '(100 50))
           (concat-test '(20 30) '(40 20 30)))
